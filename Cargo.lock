@@ -10217,6 +10217,68 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "verso-graph"
+version = "0.0.1"
+dependencies = [
+ "accesskit",
+ "android_logger",
+ "backtrace",
+ "base",
+ "bpaf",
+ "cc",
+ "cfg-if",
+ "crossbeam-channel",
+ "dirs",
+ "dpi",
+ "egui",
+ "egui-file-dialog",
+ "egui-winit",
+ "egui_glow",
+ "env_filter",
+ "euclid",
+ "gilrs",
+ "glow",
+ "headers 0.4.1",
+ "hilog",
+ "hitrace",
+ "image",
+ "ipc-channel",
+ "jni",
+ "keyboard-types",
+ "libc",
+ "libservo",
+ "log",
+ "mime_guess",
+ "napi-derive-ohos",
+ "napi-ohos",
+ "nix",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "ohos-abilitykit-sys",
+ "ohos-deviceinfo",
+ "ohos-ime",
+ "ohos-ime-sys",
+ "ohos-vsync",
+ "ohos-window-manager-sys",
+ "raw-window-handle",
+ "rustls",
+ "serde_json",
+ "servo_allocator",
+ "sig",
+ "surfman",
+ "tokio",
+ "tracing",
+ "tracing-perfetto",
+ "tracing-subscriber",
+ "url",
+ "webdriver_server",
+ "windows-sys 0.61.2",
+ "winit",
+ "winresource",
+ "xcomponent-sys",
+]
+
+[[package]]
 name = "void"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
