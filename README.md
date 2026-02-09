@@ -7,7 +7,11 @@ An open source, prototype, spatial browser that represents webpages as nodes in 
 - Clipping: DOM inspection & element extraction from nodes into graph UI as nodes
 - Local-first, permissions-based P2P co-op browsing
 
+See graphshell branch for wildly ambitious project description. Servo readme below.
+
 ---
+
+# The Servo Parallel Browser Engine Project
 
 Servo is a prototype web browser engine written in the
 [Rust](https://github.com/rust-lang/rust) language. It is currently developed on
