@@ -1,5 +1,5 @@
 [package]
-name = "verso-graph"
+name = "graphshell"
 build = "build.rs"
 version = "0.0.1"
 authors.workspace = true
@@ -9,12 +9,12 @@ publish.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "verso_graph"
+name = "graphshell"
 path = "lib.rs"
 bench = false
 
 [[bin]]
-name = "verso-graph"
+name = "graphshell"
 path = "main.rs"
 bench = false
 
@@ -33,10 +33,10 @@ cc = "1.2"
 winresource = "0.1"
 
 [package.metadata.winresource]
-FileDescription = "Verso Graph Browser"
+FileDescription = "GraphShell Browser"
 LegalCopyright = "© The Verso Project Developers"
-OriginalFilename = "verso-graph.exe"
-ProductName = "Verso Graph Browser"
+OriginalFilename = "graphshell.exe"
+ProductName = "GraphShell Browser"
 
 [features]
 default = ["gamepad", "libservo/clipboard", "js_jit", "max_log_level", "webgpu", "webxr"]
@@ -75,7 +75,10 @@ log = { workspace = true }
 mime_guess = { workspace = true }
 raw-window-handle = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
+serde = { workspace = true, features = ["derive"] }
+slotmap = "1.0"
 tokio = { workspace = true }
+toml = "0.8"
 tracing = { workspace = true, optional = true }
 tracing-perfetto = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["env-filter"] }

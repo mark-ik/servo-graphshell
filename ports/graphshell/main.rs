@@ -36,7 +36,7 @@ fn main() {
     }
     cfg_if::cfg_if! {
         if #[cfg(not(any(target_os = "android", target_env = "ohos")))] {
-            verso_graph::main()
+            graphshell::main()
         } else {
             // Android: see ports/servoshell/egl/android/mod.rs.
             // OpenHarmony: see ports/servoshell/egl/ohos/mod.rs.

@@ -30,6 +30,9 @@ use crate::desktop::event_loop::AppEvent;
 use crate::desktop::headed_window;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
+use crate::app::GraphBrowserApp;
+use crate::input;
+use crate::render;
 
 /// The user interface of a headed servoshell. Currently this is implemented via
 /// egui.
@@ -59,6 +62,18 @@ pub struct Gui {
     ///
     /// These need to be cached across egui draw calls.
     favicon_textures: HashMap<WebViewId, (egui::TextureHandle, egui::load::SizedTexture)>,
+    
+    /// Graph browser application state
+    graph_app: GraphBrowserApp,
+    
+    /// Last frame time for physics delta time
+    last_frame_time: std::time::Instant,
+    
+    /// Whether we've synced existing tabs to the graph on init
+    tabs_synced_to_graph: bool,
+    
+    /// Cached reference to RunningAppState for webview creation
+    state: Option<Rc<RunningAppState>>,
 }
 
 fn truncate_with_ellipsis(input: &str, max_length: usize) -> String {
@@ -113,6 +128,9 @@ impl Gui {
             options.fallback_theme = egui::Theme::Light;
         });
 
+        let mut graph_app = GraphBrowserApp::new();
+        graph_app.init_demo_graph();
+
         Self {
             rendering_context,
             context,
@@ -124,6 +142,10 @@ impl Gui {
             can_go_back: false,
             can_go_forward: false,
             favicon_textures: Default::default(),
+            graph_app,
+            last_frame_time: std::time::Instant::now(),
+            tabs_synced_to_graph: false,
+            state: None,
         }
     }
 
@@ -131,6 +153,15 @@ impl Gui {
         self.context
             .egui_ctx
             .memory(|memory| memory.focused().is_some())
+    }
+
+    pub(crate) fn is_graph_view(&self) -> bool {
+        matches!(self.graph_app.view, crate::app::View::Graph)
+    }
+    
+    /// Set the RunningAppState reference for webview creation
+    pub(crate) fn set_state(&mut self, state: Rc<RunningAppState>) {
+        self.state = Some(state);
     }
 
     pub(crate) fn surrender_focus(&self) {
@@ -146,7 +177,26 @@ impl Gui {
         winit_window: &Window,
         event: &WindowEvent,
     ) -> EventResponse {
-        self.context.on_window_event(winit_window, event)
+        let mut response = self.context.on_window_event(winit_window, event);
+
+        // In graph view, consume all user input events so they never reach the WebView.
+        if matches!(self.graph_app.view, crate::app::View::Graph) {
+            match event {
+                WindowEvent::KeyboardInput { .. }
+                | WindowEvent::ModifiersChanged(_)
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::CursorMoved { .. }
+                | WindowEvent::CursorLeft { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::Touch(_)
+                | WindowEvent::PinchGesture { .. } => {
+                    response.consumed = true;
+                }
+                _ => {}
+            }
+        }
+
+        response
     }
 
     /// The height of the top toolbar of this user inteface ie the distance from the top of the
@@ -263,6 +313,9 @@ impl Gui {
         window: &ServoShellWindow,
         headed_window: &headed_window::HeadedWindow,
     ) {
+        // Note: We need Rc<RunningAppState> for webview creation, but this method
+        // is called from trait methods that only provide &RunningAppState.
+        // The caller should have Rc available at the call site.
         self.rendering_context
             .make_current()
             .expect("Could not make RenderingContext current");
@@ -279,6 +332,40 @@ impl Gui {
         let winit_window = headed_window.winit_window();
         context.run(winit_window, |ctx| {
             load_pending_favicons(ctx, window, favicon_textures);
+
+            // Handle keyboard shortcuts regardless of view (e.g., toggle view)
+            input::handle_keyboard(&mut self.graph_app, ctx);
+
+            // Check which view mode we're in (used throughout rendering)
+            let is_graph_view = matches!(self.graph_app.view, crate::app::View::Graph);
+
+            // Sync existing webviews to graph nodes on first frame
+            if !self.tabs_synced_to_graph {
+                self.tabs_synced_to_graph = true;
+                use euclid::default::Point2D;
+                
+                // Collect webviews first (to avoid multiple borrows)
+                let webviews: Vec<_> = window.webviews()
+                    .into_iter()
+                    .collect();
+                
+                let count = webviews.len() as f32;
+                for (idx, (_wv_id, _wv)) in webviews.iter().enumerate() {
+                    // Position nodes in a circle around the center
+                    let angle = (idx as f32) * std::f32::consts::TAU / count.max(1.0);
+                    let radius = 150.0;
+                    let center_x = 400.0;
+                    let center_y = 300.0;
+                    let x = center_x + radius * angle.cos();
+                    let y = center_y + radius * angle.sin();
+                    
+                    // Create a Cold node for this webview (no active rendering)
+                    let node_url = format!("Tab {}", idx + 1);
+                    let _node_key = self.graph_app.add_node_and_sync(node_url, Point2D::new(x, y));
+                    // Note: Webviews will be destroyed by lifecycle management below
+                    // We don't close them here to avoid emptying the webview collection
+                }
+            }
 
             // TODO: While in fullscreen add some way to mitigate the increased phishing risk
             // when not displaying the URL bar: https://github.com/servo/servo/issues/32443
@@ -369,6 +456,22 @@ impl Gui {
                                         );
                                     }
 
+                                    // Graph/Detail view toggle button
+                                    let (view_icon, view_tooltip) = match self.graph_app.view {
+                                        crate::app::View::Graph => ("🌐", "Switch to Detail View"),
+                                        crate::app::View::Detail(_) => ("🗺", "Switch to Graph View"),
+                                    };
+                                    let view_toggle_button = ui.add(Gui::toolbar_button(view_icon))
+                                        .on_hover_text(view_tooltip);
+                                    view_toggle_button.widget_info(|| {
+                                        let mut info = WidgetInfo::new(WidgetType::Button);
+                                        info.label = Some("Toggle View".into());
+                                        info
+                                    });
+                                    if view_toggle_button.clicked() {
+                                        self.graph_app.toggle_view();
+                                    }
+
                                     let location_id = egui::Id::new("location_input");
                                     let location_field = ui.add_sized(
                                         ui.available_size(),
@@ -419,93 +522,151 @@ impl Gui {
                     );
                 });
 
-                // A simple Tab header strip
-                TopBottomPanel::top("tabs").show(ctx, |ui| {
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            for (id, webview) in window.webviews().into_iter() {
-                                let favicon = favicon_textures
-                                    .get(&id)
-                                    .map(|(_, favicon)| favicon)
-                                    .copied();
-                                Self::browser_tab(ui, window, webview, favicon);
-                            }
+                // Only show tab bar in detail view, not in graph view
+                if !is_graph_view {
+                    // A simple Tab header strip
+                    TopBottomPanel::top("tabs").show(ctx, |ui| {
+                        ui.allocate_ui_with_layout(
+                            ui.available_size(),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                for (id, webview) in window.webviews().into_iter() {
+                                    let favicon = favicon_textures
+                                        .get(&id)
+                                        .map(|(_, favicon)| favicon)
+                                        .copied();
+                                    Self::browser_tab(ui, window, webview, favicon);
+                                }
 
-                            let new_tab_button = ui.add(Gui::toolbar_button("+"));
-                            new_tab_button.widget_info(|| {
-                                let mut info = WidgetInfo::new(WidgetType::Button);
-                                info.label = Some("New tab".into());
-                                info
-                            });
-                            if new_tab_button.clicked() {
-                                window
-                                    .queue_user_interface_command(UserInterfaceCommand::NewWebView);
-                            }
+                                let new_tab_button = ui.add(Gui::toolbar_button("+"));
+                                new_tab_button.widget_info(|| {
+                                    let mut info = WidgetInfo::new(WidgetType::Button);
+                                    info.label = Some("New tab".into());
+                                    info
+                                });
+                                if new_tab_button.clicked() {
+                                    window
+                                        .queue_user_interface_command(UserInterfaceCommand::NewWebView);
+                                }
 
-                            let new_window_button = ui.add(Gui::toolbar_button("⊞"));
-                            new_window_button.widget_info(|| {
-                                let mut info = WidgetInfo::new(WidgetType::Button);
-                                info.label = Some("New window".into());
-                                info
-                            });
-                            if new_window_button.clicked() {
-                                window
-                                    .queue_user_interface_command(UserInterfaceCommand::NewWindow);
-                            }
-                        },
-                    );
-                });
+                                let new_window_button = ui.add(Gui::toolbar_button("⊞"));
+                                new_window_button.widget_info(|| {
+                                    let mut info = WidgetInfo::new(WidgetType::Button);
+                                    info.label = Some("New window".into());
+                                    info
+                                });
+                                if new_window_button.clicked() {
+                                    window
+                                        .queue_user_interface_command(UserInterfaceCommand::NewWindow);
+                                }
+                            },
+                        );
+                    });
+                }
             };
 
             // The toolbar height is where the Context’s available rect starts.
             // For reasons that are unclear, the TopBottomPanel’s ui cursor exceeds this by one egui
             // point, but the Context is correct and the TopBottomPanel is wrong.
             *toolbar_height = Length::new(ctx.available_rect().min.y);
-
-            let scale =
-                Scale::<_, DeviceIndependentPixel, DevicePixel>::new(ctx.pixels_per_point());
-
-            headed_window.for_each_active_dialog(window, |dialog| dialog.update(ctx));
-
-            // If the top parts of the GUI changed size, then update the size of the WebView and also
-            // the size of its RenderingContext.
-            let rect = ctx.available_rect();
-            let size = Size2D::new(rect.width(), rect.height()) * scale;
-            if let Some(webview) = window.active_webview() &&
-                size != webview.size()
-            {
-                // `rect` is sized to just the WebView viewport, which is required by
-                // `OffscreenRenderingContext` See:
-                // <https://github.com/servo/servo/issues/38369#issuecomment-3138378527>
-                webview.resize(PhysicalSize::new(size.width as u32, size.height as u32))
-            }
-
-            if let Some(status_text) = &self.status_text {
-                egui::Tooltip::always_open(
-                    ctx.clone(),
-                    LayerId::background(),
-                    "tooltip layer".into(),
-                    pos2(0.0, ctx.available_rect().max.y),
-                )
-                .show(|ui| ui.add(Label::new(status_text.clone()).extend()));
-            }
-
-            window.repaint_webviews();
-
-            if let Some(render_to_parent) = rendering_context.render_to_parent_callback() {
-                ctx.layer_painter(LayerId::background()).add(PaintCallback {
-                    rect: ctx.available_rect(),
-                    callback: Arc::new(CallbackFn::new(move |info, painter| {
-                        let clip = info.viewport_in_pixels();
-                        let rect_in_parent = Rect::new(
-                            Point2D::new(clip.left_px, clip.from_bottom_px),
-                            Size2D::new(clip.width_px, clip.height_px),
+            
+            // Update physics simulation (runs in both graph and detail view)
+            let now = std::time::Instant::now();
+            let dt = (now - self.last_frame_time).as_secs_f32();
+            self.last_frame_time = now;
+            self.graph_app.update_physics(dt);
+            
+            // === WEBVIEW LIFECYCLE MANAGEMENT ===
+            // Ensure webviews only exist when needed (in detail view)
+            if is_graph_view {
+                // Graph view: destroy all webviews to prevent framebuffer bleed-through
+                let webviews_to_close: Vec<_> = window.webviews()
+                    .into_iter()
+                    .map(|(wv_id, _)| wv_id)
+                    .collect();
+                for wv_id in webviews_to_close {
+                    window.close_webview(wv_id);
+                    if let Some(node_key) = self.graph_app.unmap_webview(wv_id) {
+                        self.graph_app.demote_node_to_cold(node_key);
+                    }
+                }
+            } else if let crate::app::View::Detail(active_node) = self.graph_app.view {
+                // Detail view: ensure webview exists for active node
+                if self.graph_app.get_webview_for_node(active_node).is_none() {
+                    // Need to create webview for this node
+                    if let (Some(node), Some(state)) = 
+                        (self.graph_app.graph.get_node(active_node), self.state.as_ref()) {
+                        let url = if let Ok(parsed) = Url::parse(&node.url) {
+                            parsed
+                        } else {
+                            Url::parse("about:blank").unwrap()
+                        };
+                        
+                        let webview = window.create_and_activate_toplevel_webview(
+                            state.clone(),
+                            url,
                         );
-                        render_to_parent(painter.gl(), rect_in_parent)
-                    })),
-                });
+                        
+                        self.graph_app.map_webview_to_node(webview.id(), active_node);
+                        self.graph_app.promote_node_to_active(active_node);
+                    }
+                } else {
+                    // Webview exists, just make sure it's marked as active
+                    self.graph_app.promote_node_to_active(active_node);
+                }
+            }
+            
+            // EXCLUSIVE VIEW RENDERING: Only one of these executes per frame
+            if is_graph_view {
+                // === GRAPH VIEW: Only render the spatial graph ===
+                render::render_graph(ctx, &mut self.graph_app);
+                
+            } else {
+                // === DETAIL VIEW: Only render the webview ===
+                let scale =
+                    Scale::<_, DeviceIndependentPixel, DevicePixel>::new(ctx.pixels_per_point());
+
+                headed_window.for_each_active_dialog(window, |dialog| dialog.update(ctx));
+
+                // If the top parts of the GUI changed size, then update the size of the WebView and also
+                // the size of its RenderingContext.
+                let rect = ctx.available_rect();
+                let size = Size2D::new(rect.width(), rect.height()) * scale;
+                if let Some(webview) = window.active_webview() &&
+                    size != webview.size()
+                {
+                    // `rect` is sized to just the WebView viewport, which is required by
+                    // `OffscreenRenderingContext` See:
+                    // <https://github.com/servo/servo/issues/38369#issuecomment-3138378527>
+                    webview.resize(PhysicalSize::new(size.width as u32, size.height as u32))
+                }
+
+                if let Some(status_text) = &self.status_text {
+                    egui::Tooltip::always_open(
+                        ctx.clone(),
+                        LayerId::background(),
+                        "tooltip layer".into(),
+                        pos2(0.0, ctx.available_rect().max.y),
+                    )
+                    .show(|ui| ui.add(Label::new(status_text.clone()).extend()));
+                }
+
+                // Repaint all webviews and render to parent window
+                window.repaint_webviews();
+
+                if let Some(render_to_parent) = rendering_context.render_to_parent_callback() {
+                    ctx.layer_painter(LayerId::background()).add(PaintCallback {
+                        rect: ctx.available_rect(),
+                        callback: Arc::new(CallbackFn::new(move |info, painter| {
+                            let clip = info.viewport_in_pixels();
+                            let rect_in_parent = Rect::new(
+                                Point2D::new(clip.left_px, clip.from_bottom_px),
+                                Size2D::new(clip.width_px, clip.height_px),
+                            );
+                            render_to_parent(painter.gl(), rect_in_parent)
+                        })),
+                    });
+                }
             }
         });
     }

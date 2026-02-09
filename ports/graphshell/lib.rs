@@ -7,6 +7,14 @@ use cfg_if::cfg_if;
 #[cfg(test)]
 mod test;
 
+// Graph browser core modules
+mod app;
+mod config;
+mod graph;
+mod input;
+mod physics;
+mod render;
+
 #[cfg(not(target_os = "android"))]
 mod backtrace;
 #[cfg(not(target_env = "ohos"))]

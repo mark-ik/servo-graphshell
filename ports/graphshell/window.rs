@@ -119,9 +119,9 @@ impl ServoShellWindow {
         self.platform_window().rendering_context().present();
     }
 
-    /// Whether or not this [`ServoShellWindow`] has any [`WebView`]s.
+    /// Whether or not this [`ServoShellWindow`] should close.
     pub(crate) fn should_close(&self) -> bool {
-        self.webview_collection.borrow().is_empty() || self.close_scheduled.get()
+        self.close_scheduled.get()
     }
 
     pub(crate) fn contains_webview(&self, id: WebViewId) -> bool {

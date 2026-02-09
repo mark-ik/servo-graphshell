@@ -544,11 +544,16 @@ impl HeadedWindow {
             // WARNING: do not defer painting or presenting to some later tick of the event
             // loop or servoshell may become unresponsive! (servo#30312)
             let mut gui = self.gui.borrow_mut();
+            // Store state Rc before calling update
+            gui.set_state(state.clone());
             gui.update(&state, &window, self);
             gui.paint(&self.winit_window);
         }
 
         let forward_mouse_event_to_egui = |point: Option<PhysicalPosition<f64>>| {
+            if self.gui.borrow().is_graph_view() {
+                return true;
+            }
             if window
                 .active_webview()
                 .is_some_and(|webview| self.has_active_dialog_for_webview(webview.id()))
@@ -595,6 +600,10 @@ impl HeadedWindow {
                 // the GUI, and present the new frame.
                 self.winit_window.request_redraw();
             },
+            WindowEvent::CloseRequested => {
+                window.schedule_close();
+                consumed = true;
+            },
             WindowEvent::CursorMoved { position, .. }
                 if !forward_mouse_event_to_egui(Some(position)) => {},
             WindowEvent::MouseInput {
@@ -629,6 +638,7 @@ impl HeadedWindow {
                     .on_window_event(&self.winit_window, event);
 
                 if let WindowEvent::Resized(_) = event {
+                    self.gui.borrow_mut().set_state(state.clone());
                     self.rebuild_user_interface(&state, &window);
                 }
 
