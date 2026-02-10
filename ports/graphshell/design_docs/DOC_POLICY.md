@@ -57,7 +57,7 @@ The `BUILD.md` document provides cross-platform build instructions for Graphshel
 - **Trigger**: When syncing upstream Servo changes:
   - Check if Rust version requirements changed (see `rust-toolchain.toml`)
   - Verify `mach bootstrap` and `mach build` commands still work
-  - Test build instructions on at least one platform (preferably the maintainer's native platform)
+  - Test build instructions on at least one platform (preferably the maintainer's native platform, Windows (or using WSL))
   - Document any new platform requirements or tool versions
 
 - **Update process**:
@@ -68,8 +68,6 @@ The `BUILD.md` document provides cross-platform build instructions for Graphshel
   5. Commit BUILD.md updates together with Servo version bumps
 
 - **Deprecation**: If a platform becomes unsupported by Servo, mark instructions as "Deprecated" with date and move detailed instructions to `archive_docs/` while keeping a reference in BUILD.md
-
-**Rationale:** Stale build instructions waste developer time and create frustration. A few minutes of validation per sync prevents hours of debugging by team members.
 
 ### 8. Implementation Planning Documents: Feature-Driven Organization
 
@@ -84,6 +82,12 @@ Checklists, task lists, and implementation planning documents should be organize
 - **Outputs**: Deliverables (documents, code, diagrams) that result from completing this target
 - **Success Criteria**: Knowledge validation questions that confirm deep understanding
 
-**Rationale:** Different team members or situations may require different pacing. Organizing by feature targets allows developers to work at their own speed while ensuring all acceptance criteria are met. Calendar-based planning (days/weeks) is applied at the roadmap level where it's appropriate; task checklists remain flexible.
+**Workflow Documentation Rule**
 
-**Example naming:** Rename "Week 1 Checklist" → "Architecture Study: Feature Targets & Validation Tests" to reflect that it's driven by deliverables, not calendar duration.
+When asked to do a project (like implementing a feature, or trying to accomplish something documented as a planned task in design_docs) that requires changing the codebase (not the docs), create a markdown file in the relevant design_docs directory with the current date, a keyword related to the task (such as the feature being implemented), and the suffix _plan. Include in this file three sections:
+
+- (keyword) Plan: track phases and progress
+- Findings: store research and findings
+- Progress: session log and test results
+
+Update the file every two prompts related to the project, or every two tasks you complete related to the project. Update the file upon completing the project, and move it to archive docs (creating a timestamped folder if none has been made for the day).
