@@ -48,6 +48,16 @@ pub fn handle_mouse(app: &mut GraphBrowserApp, ctx: &egui::Context, response: &e
     let mut focused_node: Option<crate::graph::NodeKey> = None;
     let mut multi_select = false;
 
+    // Handle mouse wheel for zoom
+    ctx.input(|i| {
+        let scroll_delta = i.smooth_scroll_delta.y + i.raw_scroll_delta.y;
+        if scroll_delta != 0.0 {
+            // Convert scroll delta to zoom delta (positive scroll = zoom in)
+            let zoom_delta = scroll_delta * 0.001;
+            app.camera.zoom(zoom_delta);
+        }
+    });
+
     // Pause physics while the user is interacting with the graph
     let is_interacting = ctx.input(|i| i.pointer.button_down(PointerButton::Primary));
     app.set_interacting(is_interacting);
@@ -89,15 +99,17 @@ pub fn handle_mouse(app: &mut GraphBrowserApp, ctx: &egui::Context, response: &e
         if i.pointer.button_down(PointerButton::Primary) {
             let delta = i.pointer.delta();
             if delta.length() > 0.0 {
+                // Account for zoom when dragging
+                let world_delta = Vec2::new(delta.x / app.camera.zoom, delta.y / app.camera.zoom);
                 if let Some(node_key) = drag_node {
                     // Drag specific node
                     if let Some(node) = app.graph.get_node_mut(node_key) {
-                        node.position.x += delta.x;
-                        node.position.y += delta.y;
+                        node.position.x += world_delta.x;
+                        node.position.y += world_delta.y;
                     }
                 } else {
                     // Pan entire graph only if not dragging a node
-                    pan_graph(app, delta);
+                    pan_graph(app, world_delta);
                 }
             }
         }
@@ -129,20 +141,27 @@ fn pan_graph(app: &mut GraphBrowserApp, delta: Vec2) {
 fn find_node_at_position(app: &GraphBrowserApp, pos: Pos2) -> Option<crate::graph::NodeKey> {
     // Check each node to see if the click is within its radius
     for node in app.graph.nodes() {
-        let node_pos = Pos2::new(node.position.x, node.position.y);
+        // Apply camera transform to node position
+        let translated_x = node.position.x - app.camera.position.x;
+        let translated_y = node.position.y - app.camera.position.y;
+        let node_pos = Pos2::new(
+            translated_x * app.camera.zoom,
+            translated_y * app.camera.zoom,
+        );
         let distance = (pos - node_pos).length();
-        
-        // Node radius based on lifecycle (matches render.rs)
-        let radius = match node.lifecycle {
+
+        // Node radius based on lifecycle (matches render.rs), scaled by zoom
+        let base_radius = match node.lifecycle {
             crate::graph::NodeLifecycle::Active => 15.0,
             crate::graph::NodeLifecycle::Warm => 12.0,
             crate::graph::NodeLifecycle::Cold => 10.0,
         };
-        
+        let radius = base_radius * app.camera.zoom;
+
         if distance <= radius {
             return Some(node.id);
         }
     }
-    
+
     None
 }

@@ -82,7 +82,7 @@ Checklists, task lists, and implementation planning documents should be organize
 - **Outputs**: Deliverables (documents, code, diagrams) that result from completing this target
 - **Success Criteria**: Knowledge validation questions that confirm deep understanding
 
-**Workflow Documentation Rule**
+### Workflow Documentation Rule
 
 When asked to do a project (like implementing a feature, or trying to accomplish something documented as a planned task in design_docs) that requires changing the codebase (not the docs), create a markdown file in the relevant design_docs directory with the current date, a keyword related to the task (such as the feature being implemented), and the suffix _plan. Include in this file three sections:
 
@@ -90,4 +90,4 @@ When asked to do a project (like implementing a feature, or trying to accomplish
 - Findings: store research and findings
 - Progress: session log and test results
 
-Update the file every two prompts related to the project, or every two tasks you complete related to the project. Update the file upon completing the project, and move it to archive docs (creating a timestamped folder if none has been made for the day).
+Update the file every two prompts related to the project, or every two tasks you complete related to the project. Update the file upon completing the project, and move it to archive docs (creating a timestamped folder if none has been made for the day). Reread the relevant file before working on the same project, if the _plan file exists.

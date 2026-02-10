@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use crate::graph::{Graph, NodeKey};
+use crate::input::camera::Camera;
 use crate::physics::{PhysicsEngine, PhysicsConfig};
 use crate::physics::worker::{PhysicsWorker, PhysicsCommand, PhysicsResponse};
 use servo::WebViewId;
@@ -44,28 +45,31 @@ impl Default for SplitViewConfig {
 pub struct GraphBrowserApp {
     /// The graph data structure
     pub graph: Graph,
-    
+
     /// Physics engine (for local queries, actual simulation runs on worker)
     pub physics: PhysicsEngine,
-    
+
     /// Physics worker thread
     physics_worker: Option<PhysicsWorker>,
-    
+
     /// Current view
     pub view: View,
-    
+
     /// Split view configuration
     pub split_config: SplitViewConfig,
-    
+
     /// Currently selected nodes (can be multiple)
     pub selected_nodes: Vec<NodeKey>,
-    
+
     /// Bidirectional mapping between browser tabs and graph nodes
     webview_to_node: HashMap<WebViewId, NodeKey>,
     node_to_webview: HashMap<NodeKey, WebViewId>,
 
     /// True while the user is actively interacting (drag/pan) with the graph
     is_interacting: bool,
+
+    /// Camera for graph navigation (zoom and pan)
+    pub camera: Camera,
 }
 
 impl GraphBrowserApp {
@@ -90,6 +94,7 @@ impl GraphBrowserApp {
             webview_to_node: HashMap::new(),
             node_to_webview: HashMap::new(),
             is_interacting: false,
+            camera: Camera::new(),
         }
     }
     
@@ -179,6 +184,11 @@ impl GraphBrowserApp {
         self.select_node(key, false);
     }
     
+    /// Update camera (call every frame for smooth interpolation)
+    pub fn update_camera(&mut self, dt: f32) {
+        self.camera.update(dt);
+    }
+
     /// Update physics (call every frame)
     pub fn update_physics(&mut self, dt: f32) {
         // Send step command (no graph clone, lightweight)

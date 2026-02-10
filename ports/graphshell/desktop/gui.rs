@@ -570,10 +570,11 @@ impl Gui {
             // point, but the Context is correct and the TopBottomPanel is wrong.
             *toolbar_height = Length::new(ctx.available_rect().min.y);
             
-            // Update physics simulation (runs in both graph and detail view)
+            // Update physics simulation and camera (runs in both graph and detail view)
             let now = std::time::Instant::now();
             let dt = (now - self.last_frame_time).as_secs_f32();
             self.last_frame_time = now;
+            self.graph_app.update_camera(dt);
             self.graph_app.update_physics(dt);
             
             // === WEBVIEW LIFECYCLE MANAGEMENT ===

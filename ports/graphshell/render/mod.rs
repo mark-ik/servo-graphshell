@@ -7,6 +7,7 @@
 use crate::app::{GraphBrowserApp, View};
 use crate::graph::{EdgeStyle, NodeLifecycle};
 use crate::input;
+use crate::input::camera::Camera;
 use egui::{CentralPanel, Color32, Pos2, Stroke, Vec2};
 use euclid::default::Point2D;
 
@@ -28,11 +29,11 @@ pub fn render_graph(ctx: &egui::Context, app: &mut GraphBrowserApp) {
         
         // Draw edges first (so nodes are on top)
         for edge in app.graph.edges() {
-            if let (Some(from_node), Some(to_node)) = 
+            if let (Some(from_node), Some(to_node)) =
                 (app.graph.get_node(edge.from), app.graph.get_node(edge.to)) {
-                
-                let from_pos = to_egui_pos(from_node.position);
-                let to_pos = to_egui_pos(to_node.position);
+
+                let from_pos = to_egui_pos(from_node.position, &app.camera);
+                let to_pos = to_egui_pos(to_node.position, &app.camera);
                 
                 let color = Color32::from_rgba_premultiplied(
                     (edge.color[0] * 255.0) as u8,
@@ -54,14 +55,17 @@ pub fn render_graph(ctx: &egui::Context, app: &mut GraphBrowserApp) {
         
         // Draw nodes
         for node in app.graph.nodes() {
-            let pos = to_egui_pos(node.position);
+            let pos = to_egui_pos(node.position, &app.camera);
             
             // Node size and color based on lifecycle
-            let (radius, fill_color) = match node.lifecycle {
+            let (base_radius, fill_color) = match node.lifecycle {
                 NodeLifecycle::Active => (15.0, Color32::from_rgb(100, 200, 255)),
                 NodeLifecycle::Warm => (12.0, Color32::from_rgb(150, 150, 200)),
                 NodeLifecycle::Cold => (10.0, Color32::from_rgb(100, 100, 120)),
             };
+
+            // Apply camera zoom to radius
+            let radius = base_radius * app.camera.zoom;
             
             // Highlight selected nodes
             let final_color = if node.is_selected {
@@ -97,9 +101,14 @@ pub fn render_graph(ctx: &egui::Context, app: &mut GraphBrowserApp) {
     });
 }
 
-/// Helper to convert our Point2D to egui Pos2
-fn to_egui_pos(point: Point2D<f32>) -> Pos2 {
-    Pos2::new(point.x, point.y)
+/// Helper to convert our Point2D to egui Pos2 with camera transform applied
+fn to_egui_pos(point: Point2D<f32>, camera: &Camera) -> Pos2 {
+    // Apply camera transform: translate then scale
+    let translated_x = point.x - camera.position.x;
+    let translated_y = point.y - camera.position.y;
+    let scaled_x = translated_x * camera.zoom;
+    let scaled_y = translated_y * camera.zoom;
+    Pos2::new(scaled_x, scaled_y)
 }
 
 /// Truncate a string with ellipsis
