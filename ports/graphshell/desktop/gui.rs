@@ -68,10 +68,13 @@ pub struct Gui {
     
     /// Last frame time for physics delta time
     last_frame_time: std::time::Instant,
-    
-    /// Whether we've synced existing tabs to the graph on init
-    tabs_synced_to_graph: bool,
-    
+
+    /// Track previous URL for each webview to create edges on navigation
+    webview_previous_url: HashMap<WebViewId, Url>,
+
+    /// Track which nodes had webviews before switching to graph view (for restoration)
+    nodes_with_webviews: Vec<crate::graph::NodeKey>,
+
     /// Cached reference to RunningAppState for webview creation
     state: Option<Rc<RunningAppState>>,
 }
@@ -129,7 +132,13 @@ impl Gui {
         });
 
         let mut graph_app = GraphBrowserApp::new();
-        graph_app.init_demo_graph();
+
+        // Create initial node for the starting URL
+        use euclid::default::Point2D;
+        let _initial_node = graph_app.add_node_and_sync(
+            initial_url.to_string(),
+            Point2D::new(400.0, 300.0)
+        );
 
         Self {
             rendering_context,
@@ -144,7 +153,8 @@ impl Gui {
             favicon_textures: Default::default(),
             graph_app,
             last_frame_time: std::time::Instant::now(),
-            tabs_synced_to_graph: false,
+            webview_previous_url: HashMap::new(),
+            nodes_with_webviews: Vec::new(),
             state: None,
         }
     }
@@ -162,6 +172,191 @@ impl Gui {
     /// Set the RunningAppState reference for webview creation
     pub(crate) fn set_state(&mut self, state: Rc<RunningAppState>) {
         self.state = Some(state);
+    }
+
+    /// Sync all webviews to graph nodes (creates nodes for new pages, updates existing ones)
+    fn sync_webviews_to_graph(
+        graph_app: &mut GraphBrowserApp,
+        webview_previous_url: &mut HashMap<WebViewId, Url>,
+        window: &ServoShellWindow,
+    ) {
+        use euclid::default::Point2D;
+        use crate::graph::EdgeType;
+
+        // Collect all webviews and their current URLs
+        let webviews: Vec<(WebViewId, Option<Url>, Option<String>)> = window
+            .webviews()
+            .into_iter()
+            .map(|(wv_id, wv)| {
+                let url = wv.url();
+                let title = wv.page_title();
+                (wv_id, url, title)
+            })
+            .collect();
+
+        // Track which nodes we've seen (to remove old ones later)
+        let mut seen_webviews = std::collections::HashSet::new();
+
+        for (wv_id, url_opt, title_opt) in webviews {
+            seen_webviews.insert(wv_id);
+
+            // Skip webviews without URLs (not yet loaded)
+            let Some(url) = url_opt else { continue };
+
+            // Skip about:blank pages
+            if url.as_str() == "about:blank" {
+                continue;
+            }
+
+            // Check if we already have a node for this webview
+            if let Some(node_key) = graph_app.get_node_for_webview(wv_id) {
+                // Update existing node
+                if let Some(node) = graph_app.graph.get_node_mut(node_key) {
+                    // Update title if available
+                    if let Some(title) = title_opt.as_ref() {
+                        if !title.is_empty() && &node.title != title {
+                            node.title = title.clone();
+                        }
+                    }
+
+                    // Update last_visited timestamp
+                    node.last_visited = std::time::SystemTime::now();
+                }
+
+                // Check if URL changed (navigation event)
+                if let Some(previous_url) = webview_previous_url.get(&wv_id) {
+                    if previous_url != &url {
+                        // URL changed - create an edge from previous to current
+
+                        // The from_key is the node currently mapped to this webview (before navigation)
+                        let from_key = node_key;
+
+                        // Always create a NEW node for the new URL (don't reuse by URL)
+                        // This reflects actual browsing behavior - each visit is a separate node
+                        let new_pos = Point2D::new(400.0, 300.0);
+                        let to_key = graph_app.add_node_and_sync(url.to_string(), new_pos);
+
+                        // Update the mapping to point to the new node
+                        graph_app.map_webview_to_node(wv_id, to_key);
+
+                        // Update title if available
+                        if let Some(title) = title_opt.as_ref() {
+                            if let Some(node) = graph_app.graph.get_node_mut(to_key) {
+                                node.title = title.clone();
+                            }
+                        }
+
+                        // Create edge from old node to new node
+                        // Determine edge type: History (back/forward) or Hyperlink (new navigation)
+                        if from_key != to_key {
+                            // Check if an edge already exists between these nodes (shouldn't happen with new node creation)
+                            let existing_forward = graph_app.graph
+                                .get_node(from_key)
+                                .and_then(|n| {
+                                    n.out_edges.iter().find(|&&e| {
+                                        graph_app.graph.get_edge(e).map(|edge| edge.to == to_key).unwrap_or(false)
+                                    }).copied()
+                                });
+
+                            // Only create edge if one doesn't already exist
+                            if existing_forward.is_none() {
+                                // Check if a backward edge exists (from new node to old node)
+                                let existing_backward = graph_app.graph
+                                    .get_node(to_key)
+                                    .and_then(|n| {
+                                        n.out_edges.iter().find(|&&e| {
+                                            graph_app.graph.get_edge(e).map(|edge| edge.to == from_key).unwrap_or(false)
+                                        }).copied()
+                                    });
+
+                                // Determine edge type based on whether a backward edge exists
+                                let edge_type = if existing_backward.is_some() {
+                                    // Backward edge exists - this is back/forward navigation
+                                    EdgeType::History
+                                } else {
+                                    // No existing edge - this is a new hyperlink
+                                    EdgeType::Hyperlink
+                                };
+
+                                graph_app.graph.add_edge(from_key, to_key, edge_type);
+                            }
+                        }
+
+                        // Update previous URL
+                        webview_previous_url.insert(wv_id, url.clone());
+                    }
+                } else {
+                    // First time seeing this webview - just track its URL
+                    webview_previous_url.insert(wv_id, url.clone());
+                }
+            } else {
+                // No node exists for this webview
+                // Special case: check if this is the initial load of an unmapped node
+                // (This handles the initial webview connecting to the pre-created initial node)
+                let node_key = if let Some(existing_node) = graph_app.graph.get_node_by_url(&url.to_string()) {
+                    // Check if this node is not mapped to any webview (orphaned initial node)
+                    let is_mapped = graph_app.webview_node_mappings()
+                        .any(|(_, nk)| nk == existing_node.id);
+
+                    if !is_mapped {
+                        // This is the initial node - reuse it for the initial webview
+                        existing_node.id
+                    } else {
+                        // Node is already mapped - create a new one (browsing behavior)
+                        let pos = Point2D::new(400.0, 300.0);
+                        graph_app.add_node_and_sync(url.to_string(), pos)
+                    }
+                } else {
+                    // No existing node - create a new one
+                    let pos = Point2D::new(400.0, 300.0);
+                    graph_app.add_node_and_sync(url.to_string(), pos)
+                };
+
+                // Set title if available
+                if let Some(title) = title_opt {
+                    if let Some(node) = graph_app.graph.get_node_mut(node_key) {
+                        node.title = title;
+                    }
+                }
+
+                // Map webview to node
+                graph_app.map_webview_to_node(wv_id, node_key);
+
+                // Track this URL
+                webview_previous_url.insert(wv_id, url);
+            }
+        }
+
+        // Highlight the active tab's node in graph view
+        if let Some(active_wv_id) = window.webview_collection.borrow().active_id() {
+            // Clear all selections first
+            let all_node_keys: Vec<_> = graph_app.graph.nodes().map(|n| n.id).collect();
+            for node_key in all_node_keys {
+                if let Some(node) = graph_app.graph.get_node_mut(node_key) {
+                    node.is_selected = false;
+                }
+            }
+
+            // Mark the active webview's node as selected
+            if let Some(active_node_key) = graph_app.get_node_for_webview(active_wv_id) {
+                if let Some(active_node) = graph_app.graph.get_node_mut(active_node_key) {
+                    active_node.is_selected = true;
+                }
+            }
+        }
+
+        // Clean up mappings for webviews that no longer exist
+        let old_webviews: Vec<WebViewId> = graph_app
+            .webview_node_mappings()
+            .filter(|(wv_id, _)| !seen_webviews.contains(wv_id))
+            .map(|(wv_id, _)| wv_id)
+            .collect();
+
+        for wv_id in old_webviews {
+            graph_app.unmap_webview(wv_id);
+            webview_previous_url.remove(&wv_id);
+            // Note: We keep the nodes in the graph even after webview closes (browsing history)
+        }
     }
 
     pub(crate) fn surrender_focus(&self) {
@@ -326,6 +521,9 @@ impl Gui {
             location,
             location_dirty,
             favicon_textures,
+            graph_app,
+            webview_previous_url,
+            nodes_with_webviews,
             ..
         } = self;
 
@@ -334,38 +532,13 @@ impl Gui {
             load_pending_favicons(ctx, window, favicon_textures);
 
             // Handle keyboard shortcuts regardless of view (e.g., toggle view)
-            input::handle_keyboard(&mut self.graph_app, ctx);
+            input::handle_keyboard(graph_app, ctx);
 
             // Check which view mode we're in (used throughout rendering)
-            let is_graph_view = matches!(self.graph_app.view, crate::app::View::Graph);
+            let is_graph_view = matches!(graph_app.view, crate::app::View::Graph);
 
-            // Sync existing webviews to graph nodes on first frame
-            if !self.tabs_synced_to_graph {
-                self.tabs_synced_to_graph = true;
-                use euclid::default::Point2D;
-                
-                // Collect webviews first (to avoid multiple borrows)
-                let webviews: Vec<_> = window.webviews()
-                    .into_iter()
-                    .collect();
-                
-                let count = webviews.len() as f32;
-                for (idx, (_wv_id, _wv)) in webviews.iter().enumerate() {
-                    // Position nodes in a circle around the center
-                    let angle = (idx as f32) * std::f32::consts::TAU / count.max(1.0);
-                    let radius = 150.0;
-                    let center_x = 400.0;
-                    let center_y = 300.0;
-                    let x = center_x + radius * angle.cos();
-                    let y = center_y + radius * angle.sin();
-                    
-                    // Create a Cold node for this webview (no active rendering)
-                    let node_url = format!("Tab {}", idx + 1);
-                    let _node_key = self.graph_app.add_node_and_sync(node_url, Point2D::new(x, y));
-                    // Note: Webviews will be destroyed by lifecycle management below
-                    // We don't close them here to avoid emptying the webview collection
-                }
-            }
+            // Sync webviews to graph nodes (runs every frame to handle navigation)
+            Self::sync_webviews_to_graph(graph_app, webview_previous_url, window);
 
             // TODO: While in fullscreen add some way to mitigate the increased phishing risk
             // when not displaying the URL bar: https://github.com/servo/servo/issues/32443
@@ -457,7 +630,7 @@ impl Gui {
                                     }
 
                                     // Graph/Detail view toggle button
-                                    let (view_icon, view_tooltip) = match self.graph_app.view {
+                                    let (view_icon, view_tooltip) = match graph_app.view {
                                         crate::app::View::Graph => ("🌐", "Switch to Detail View"),
                                         crate::app::View::Detail(_) => ("🗺", "Switch to Graph View"),
                                     };
@@ -469,7 +642,7 @@ impl Gui {
                                         info
                                     });
                                     if view_toggle_button.clicked() {
-                                        self.graph_app.toggle_view();
+                                        graph_app.toggle_view();
                                     }
 
                                     let location_id = egui::Id::new("location_input");
@@ -570,57 +743,105 @@ impl Gui {
             // point, but the Context is correct and the TopBottomPanel is wrong.
             *toolbar_height = Length::new(ctx.available_rect().min.y);
             
-            // Update physics simulation and camera (runs in both graph and detail view)
+            // Update physics simulation (runs in both graph and detail view)
             let now = std::time::Instant::now();
             let dt = (now - self.last_frame_time).as_secs_f32();
             self.last_frame_time = now;
-            self.graph_app.update_camera(dt);
-            self.graph_app.update_physics(dt);
+            graph_app.update_physics(dt);
             
             // === WEBVIEW LIFECYCLE MANAGEMENT ===
-            // Ensure webviews only exist when needed (in detail view)
+            // Manage webviews based on current view
             if is_graph_view {
-                // Graph view: destroy all webviews to prevent framebuffer bleed-through
-                let webviews_to_close: Vec<_> = window.webviews()
-                    .into_iter()
-                    .map(|(wv_id, _)| wv_id)
-                    .collect();
-                for wv_id in webviews_to_close {
-                    window.close_webview(wv_id);
-                    if let Some(node_key) = self.graph_app.unmap_webview(wv_id) {
-                        self.graph_app.demote_node_to_cold(node_key);
+                // Graph view: save which nodes have webviews, then destroy them
+                // (prevents framebuffer bleed-through)
+                // Only save once when entering graph view (webviews exist but list empty)
+                if nodes_with_webviews.is_empty() && window.webviews().into_iter().next().is_some() {
+                    // Save node keys before destroying webviews
+                    for (wv_id, _) in window.webviews().into_iter() {
+                        if let Some(node_key) = graph_app.get_node_for_webview(wv_id) {
+                            nodes_with_webviews.push(node_key);
+                        }
+                    }
+
+                    // Now destroy all webviews
+                    let webviews_to_close: Vec<_> = window.webviews()
+                        .into_iter()
+                        .map(|(wv_id, _)| wv_id)
+                        .collect();
+                    for wv_id in webviews_to_close {
+                        window.close_webview(wv_id);
+                        if let Some(node_key) = graph_app.unmap_webview(wv_id) {
+                            graph_app.demote_node_to_cold(node_key);
+                        }
                     }
                 }
-            } else if let crate::app::View::Detail(active_node) = self.graph_app.view {
-                // Detail view: ensure webview exists for active node
-                if self.graph_app.get_webview_for_node(active_node).is_none() {
-                    // Need to create webview for this node
-                    if let (Some(node), Some(state)) = 
-                        (self.graph_app.graph.get_node(active_node), self.state.as_ref()) {
+            } else if let crate::app::View::Detail(active_node) = graph_app.view {
+                // Detail view: recreate webviews for all saved nodes
+                if !nodes_with_webviews.is_empty() {
+                    // Recreate webviews for all nodes that had them before
+                    for &node_key in nodes_with_webviews.iter() {
+                        if graph_app.get_webview_for_node(node_key).is_none() {
+                            if let (Some(node), Some(app_state)) =
+                                (graph_app.graph.get_node(node_key), self.state.as_ref()) {
+                                let url = if let Ok(parsed) = Url::parse(&node.url) {
+                                    parsed
+                                } else {
+                                    Url::parse("about:blank").unwrap()
+                                };
+
+                                let webview = if node_key == active_node {
+                                    // Active node: create and activate
+                                    window.create_and_activate_toplevel_webview(
+                                        app_state.clone(),
+                                        url,
+                                    )
+                                } else {
+                                    // Other nodes: create but don't activate
+                                    window.create_toplevel_webview(
+                                        app_state.clone(),
+                                        url,
+                                    )
+                                };
+
+                                graph_app.map_webview_to_node(webview.id(), node_key);
+
+                                if node_key == active_node {
+                                    graph_app.promote_node_to_active(node_key);
+                                }
+                            }
+                        }
+                    }
+
+                    // Clear the saved list after recreation
+                    nodes_with_webviews.clear();
+                } else if graph_app.get_webview_for_node(active_node).is_none() {
+                    // No saved nodes, just create webview for active node
+                    if let (Some(node), Some(app_state)) =
+                        (graph_app.graph.get_node(active_node), self.state.as_ref()) {
                         let url = if let Ok(parsed) = Url::parse(&node.url) {
                             parsed
                         } else {
                             Url::parse("about:blank").unwrap()
                         };
-                        
+
                         let webview = window.create_and_activate_toplevel_webview(
-                            state.clone(),
+                            app_state.clone(),
                             url,
                         );
-                        
-                        self.graph_app.map_webview_to_node(webview.id(), active_node);
-                        self.graph_app.promote_node_to_active(active_node);
+
+                        graph_app.map_webview_to_node(webview.id(), active_node);
+                        graph_app.promote_node_to_active(active_node);
                     }
                 } else {
                     // Webview exists, just make sure it's marked as active
-                    self.graph_app.promote_node_to_active(active_node);
+                    graph_app.promote_node_to_active(active_node);
                 }
             }
             
             // EXCLUSIVE VIEW RENDERING: Only one of these executes per frame
             if is_graph_view {
                 // === GRAPH VIEW: Only render the spatial graph ===
-                render::render_graph(ctx, &mut self.graph_app);
+                render::render_graph(ctx, graph_app);
 
             } else {
                 // === DETAIL VIEW: Only render the webview ===
@@ -671,7 +892,7 @@ impl Gui {
             }
 
             // Render physics config panel (available in both views)
-            render::render_physics_panel(ctx, &mut self.graph_app);
+            render::render_physics_panel(ctx, graph_app);
         });
     }
 

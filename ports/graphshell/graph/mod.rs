@@ -7,13 +7,14 @@
 //! Core structures:
 //! - `Graph`: Main graph container using SlotMap for node storage
 //! - `Node`: Webpage node with position, velocity, and metadata
-//! - `Edge`: Connection between nodes (hyperlink, bookmark, history, manual)
+//! - `Edge`: Connection between nodes (hyperlink, history)
 
 use euclid::default::{Point2D, Vector2D};
 use slotmap::{new_key_type, SlotMap};
 use std::collections::HashMap;
 
-pub mod persistence;
+pub mod egui_adapter;
+pub mod petgraph_adapter;
 pub mod spatial;
 
 // Stable node handle that survives deletions
@@ -44,9 +45,6 @@ pub struct Node {
     /// Whether this node's position is pinned (doesn't move with physics)
     pub is_pinned: bool,
     
-    /// Timestamp of when this node was created
-    pub created_at: std::time::SystemTime,
-    
     /// Timestamp of last visit
     pub last_visited: std::time::SystemTime,
     
@@ -65,10 +63,7 @@ pub struct Node {
 pub enum NodeLifecycle {
     /// Active webview (visible, rendering)
     Active,
-    
-    /// Warm webview (has thumbnail, process alive but hidden)
-    Warm,
-    
+
     /// Cold (metadata only, no process)
     Cold,
 }
@@ -78,49 +73,23 @@ pub enum NodeLifecycle {
 pub enum EdgeType {
     /// Hyperlink from one page to another
     Hyperlink,
-    
-    /// User bookmark
-    Bookmark,
-    
+
     /// Browser history traversal
     History,
-    
-    /// Manually created by user
-    Manual,
-}
-
-/// Visual style for edge rendering
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EdgeStyle {
-    Solid,
-    Dotted,
-    Bold,
-    Marker,
 }
 
 /// Connection between two nodes
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // edge_type will be read when edge rendering differentiates by type
 pub struct Edge {
-    /// Stable identifier
-    pub id: EdgeKey,
-    
     /// Source node
     pub from: NodeKey,
-    
+
     /// Target node
     pub to: NodeKey,
-    
+
     /// Type of connection
     pub edge_type: EdgeType,
-    
-    /// Visual style
-    pub style: EdgeStyle,
-    
-    /// RGBA color (for accessibility)
-    pub color: [f32; 4],
-    
-    /// When this edge was created
-    pub created_at: std::time::SystemTime,
 }
 
 /// Main graph structure
@@ -157,7 +126,6 @@ impl Graph {
             velocity: Vector2D::zero(),
             is_selected: false,
             is_pinned: false,
-            created_at: now,
             last_visited: now,
             in_edges: Vec::new(),
             out_edges: Vec::new(),
@@ -175,14 +143,10 @@ impl Graph {
             return None;
         }
         
-        let edge_key = self.edges.insert_with_key(|key| Edge {
-            id: key,
+        let edge_key = self.edges.insert(Edge {
             from,
             to,
             edge_type,
-            style: EdgeStyle::Solid,
-            color: [0.5, 0.5, 0.5, 1.0], // Default gray
-            created_at: std::time::SystemTime::now(),
         });
         
         // Update adjacency lists
@@ -224,32 +188,6 @@ impl Graph {
     /// Iterate over all edges
     pub fn edges(&self) -> impl Iterator<Item = &Edge> {
         self.edges.values()
-    }
-    
-    /// Get neighbors of a node (O(1) using adjacency lists)
-    pub fn get_neighbors(&self, key: NodeKey) -> Vec<NodeKey> {
-        let node = match self.nodes.get(key) {
-            Some(n) => n,
-            None => return Vec::new(),
-        };
-        
-        let mut neighbors = Vec::new();
-        
-        // Add nodes from outgoing edges
-        for &edge_key in &node.out_edges {
-            if let Some(edge) = self.edges.get(edge_key) {
-                neighbors.push(edge.to);
-            }
-        }
-        
-        // Add nodes from incoming edges
-        for &edge_key in &node.in_edges {
-            if let Some(edge) = self.edges.get(edge_key) {
-                neighbors.push(edge.from);
-            }
-        }
-        
-        neighbors
     }
     
     /// Count of nodes in the graph
@@ -360,8 +298,6 @@ mod tests {
         assert_eq!(edge.from, node1);
         assert_eq!(edge.to, node2);
         assert_eq!(edge.edge_type, EdgeType::Hyperlink);
-        assert_eq!(edge.style, EdgeStyle::Solid);
-        assert_eq!(edge.color, [0.5, 0.5, 0.5, 1.0]);
 
         // Adjacency lists should be updated
         let from_node = graph.get_node(node1).unwrap();
@@ -416,43 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_neighbors() {
-        let mut graph = Graph::new();
-        let node1 = graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
-        let node2 = graph.add_node("https://b.com".to_string(), Point2D::new(1.0, 1.0));
-        let node3 = graph.add_node("https://c.com".to_string(), Point2D::new(2.0, 2.0));
-
-        // Create edges: 1 <-> 2, 1 -> 3
-        graph.add_edge(node1, node2, EdgeType::Hyperlink);
-        graph.add_edge(node2, node1, EdgeType::Hyperlink);
-        graph.add_edge(node1, node3, EdgeType::Hyperlink);
-
-        // Node1 neighbors: [node2 (out), node2 (in), node3 (out)]
-        let neighbors = graph.get_neighbors(node1);
-        assert_eq!(neighbors.len(), 3);
-        assert!(neighbors.contains(&node2));
-        assert!(neighbors.contains(&node3));
-
-        // Node2 neighbors: [node1 (out), node1 (in)]
-        let neighbors = graph.get_neighbors(node2);
-        assert_eq!(neighbors.len(), 2);
-        assert!(neighbors.contains(&node1));
-
-        // Node3 neighbors: [node1 (in)]
-        let neighbors = graph.get_neighbors(node3);
-        assert_eq!(neighbors.len(), 1);
-        assert_eq!(neighbors[0], node1);
-    }
-
-    #[test]
-    fn test_get_neighbors_invalid_key() {
-        let graph = Graph::new();
-        let invalid_key = NodeKey::default();
-        let neighbors = graph.get_neighbors(invalid_key);
-        assert!(neighbors.is_empty());
-    }
-
-    #[test]
     fn test_nodes_iterator() {
         let mut graph = Graph::new();
         graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
@@ -502,7 +401,6 @@ mod tests {
 
         let invalid_key = NodeKey::default();
         assert!(graph.get_node(invalid_key).is_none());
-        assert!(graph.get_neighbors(invalid_key).is_empty());
     }
 
     #[test]
@@ -531,4 +429,5 @@ mod tests {
         graph.add_edge(node2, node1, EdgeType::Hyperlink);
         assert_eq!(graph.edge_count(), 2);
     }
+
 }

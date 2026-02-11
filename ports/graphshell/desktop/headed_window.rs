@@ -33,7 +33,7 @@ use winit::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
-use winit::keyboard::{Key as LogicalKey, ModifiersState, NamedKey as WinitNamedKey};
+use winit::keyboard::{Key as LogicalKey, KeyCode, ModifiersState, NamedKey as WinitNamedKey, PhysicalKey};
 #[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowAttributesExtWayland;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -627,8 +627,29 @@ impl HeadedWindow {
             {
                 self.gui.borrow().surrender_focus();
             },
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(key_code),
+                    state: ElementState::Pressed,
+                    ..
+                },
+                ..
+            } if matches!(
+                key_code,
+                KeyCode::KeyT | KeyCode::KeyP | KeyCode::KeyC | KeyCode::Home | KeyCode::Escape
+            ) => {
+                // Graph control shortcuts always go to GUI, even when webview has focus
+                let response = self
+                    .gui
+                    .borrow_mut()
+                    .on_window_event(&self.winit_window, &event);
+                if response.repaint {
+                    self.winit_window.request_redraw();
+                }
+                consumed = response.consumed;
+            },
             WindowEvent::KeyboardInput { .. } if !self.gui.borrow().has_keyboard_focus() => {
-                // Keyboard events should go to the WebView unless some other GUI
+                // Other keyboard events should go to the WebView unless some other GUI
                 // component has keyboard focus.
             },
             ref event => {

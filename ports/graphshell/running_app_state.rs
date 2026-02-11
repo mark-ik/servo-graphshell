@@ -119,11 +119,6 @@ impl WebViewCollection {
         self.webviews.values()
     }
 
-    /// Returns true if the collection contains no webviews.
-    pub fn is_empty(&self) -> bool {
-        self.webviews.is_empty()
-    }
-
     pub(crate) fn activate_webview(&mut self, id_to_activate: WebViewId) {
         assert!(self.creation_order.contains(&id_to_activate));
 

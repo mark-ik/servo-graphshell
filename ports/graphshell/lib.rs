@@ -9,7 +9,6 @@ mod test;
 
 // Graph browser core modules
 mod app;
-mod config;
 mod graph;
 mod input;
 mod physics;

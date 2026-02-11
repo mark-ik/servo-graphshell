@@ -34,9 +34,12 @@ pub struct PhysicsConfig {
     
     /// Velocity threshold for auto-pause (px/frame)
     pub velocity_threshold: f32,
-    
+
     /// Time to wait at low velocity before pausing (seconds)
     pub pause_delay: f32,
+
+    /// Maximum distance for repulsion force (px)
+    pub repulsion_radius: f32,
 }
 
 impl Default for PhysicsConfig {
@@ -48,6 +51,7 @@ impl Default for PhysicsConfig {
             spring_rest_length: 100.0,
             velocity_threshold: 0.001,
             pause_delay: 5.0,
+            repulsion_radius: 300.0,
         }
     }
 }
@@ -80,12 +84,6 @@ impl PhysicsEngine {
         }
     }
     
-    /// Update the spatial grid cell size (call when viewport changes)
-    pub fn update_viewport(&mut self, viewport_diagonal: f32) {
-        let cell_size = viewport_diagonal / 4.0;
-        self.spatial_grid = SpatialGrid::new(cell_size);
-    }
-    
     /// Run one physics timestep
     pub fn step(&mut self, graph: &mut Graph, dt: f32) {
         if !self.is_running {
@@ -114,19 +112,19 @@ impl PhysicsEngine {
             }
             
             let mut force = Vector2D::zero();
-            
-            // Repulsion from nearby nodes (spatial hash optimization)
-            let nearby = self.spatial_grid.query_nearby(node.position);
+
+            // Repulsion from nearby nodes (KD-tree spatial index)
+            let nearby = self.spatial_grid.query_nearby_radius(node.position, self.config.repulsion_radius);
             for &other_key in &nearby {
                 if other_key == key {
                     continue;
                 }
-                
+
                 if let Some(other_node) = graph.get_node(other_key) {
                     let delta = node.position - other_node.position;
                     let distance = delta.length();
-                    
-                    if distance > 0.0 && distance < 300.0 {
+
+                    if distance > 0.0 && distance < self.config.repulsion_radius {
                         let repulsion = self.config.repulsion_strength / (distance * distance);
                         force += delta.normalize() * repulsion;
                     }
@@ -458,15 +456,4 @@ mod tests {
         assert!(engine.low_velocity_time < pause_delay);
     }
 
-    #[test]
-    fn test_update_viewport() {
-        let config = PhysicsConfig::default();
-        let mut engine = PhysicsEngine::new(config, 1000.0);
-
-        // Update viewport (just make sure it doesn't panic)
-        engine.update_viewport(2000.0);
-
-        // Engine should still be functional
-        assert!(engine.is_running);
-    }
 }
