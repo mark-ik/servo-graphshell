@@ -14,30 +14,45 @@ pub fn handle_keyboard(app: &mut GraphBrowserApp, ctx: &egui::Context) {
     // Collect input actions (can't mutate app inside ctx.input closure)
     let mut toggle_physics = false;
     let mut toggle_view = false;
-    
+    let mut center_camera = false;
+    let mut toggle_physics_panel = false;
+
     ctx.input(|i| {
         // T: Toggle physics
         if i.key_pressed(Key::T) {
             toggle_physics = true;
         }
-        
-        // C: Center camera (implementation in Week 5)
+
+        // C: Center camera
         if i.key_pressed(Key::C) {
-            // TODO: Center camera on graph
+            center_camera = true;
         }
-        
+
+        // P: Toggle physics config panel
+        if i.key_pressed(Key::P) {
+            toggle_physics_panel = true;
+        }
+
         // Home/Escape: Toggle view
         if i.key_pressed(Key::Home) || i.key_pressed(Key::Escape) {
             toggle_view = true;
         }
     });
-    
+
     // Apply actions after input closure
     if toggle_physics {
         app.toggle_physics();
     }
     if toggle_view {
         app.toggle_view();
+    }
+    if center_camera {
+        // Get viewport dimensions from context
+        let viewport_rect = ctx.viewport_rect();
+        app.center_camera(viewport_rect.width(), viewport_rect.height());
+    }
+    if toggle_physics_panel {
+        app.toggle_physics_panel();
     }
 }
 
@@ -164,4 +179,136 @@ fn find_node_at_position(app: &GraphBrowserApp, pos: Pos2) -> Option<crate::grap
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::GraphBrowserApp;
+    use euclid::default::Point2D;
+
+    #[test]
+    fn test_find_node_at_position_no_camera_transform() {
+        let mut app = GraphBrowserApp::new();
+
+        // Add a node at (100, 100)
+        let node_key = app.graph.add_node("test".to_string(), Point2D::new(100.0, 100.0));
+
+        // Should find node at its exact position
+        let found = find_node_at_position(&app, Pos2::new(100.0, 100.0));
+        assert_eq!(found, Some(node_key));
+
+        // Should find node within radius (15.0 for Cold nodes)
+        let found = find_node_at_position(&app, Pos2::new(110.0, 100.0));
+        assert_eq!(found, Some(node_key));
+
+        // Should not find node outside radius
+        let found = find_node_at_position(&app, Pos2::new(120.0, 100.0));
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_find_node_at_position_with_zoom() {
+        let mut app = GraphBrowserApp::new();
+        app.camera.zoom = 2.0;
+
+        // Add a node at (100, 100)
+        let node_key = app.graph.add_node("test".to_string(), Point2D::new(100.0, 100.0));
+
+        // With 2x zoom, the node appears at (200, 200) in screen space
+        let found = find_node_at_position(&app, Pos2::new(200.0, 200.0));
+        assert_eq!(found, Some(node_key));
+
+        // Radius is also scaled: 10.0 * 2.0 = 20.0
+        let found = find_node_at_position(&app, Pos2::new(215.0, 200.0));
+        assert_eq!(found, Some(node_key));
+
+        // Outside scaled radius
+        let found = find_node_at_position(&app, Pos2::new(225.0, 200.0));
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_find_node_at_position_with_pan() {
+        let mut app = GraphBrowserApp::new();
+        app.camera.position = Point2D::new(50.0, 50.0);
+
+        // Add a node at (100, 100)
+        let node_key = app.graph.add_node("test".to_string(), Point2D::new(100.0, 100.0));
+
+        // With camera at (50, 50), node at (100, 100) appears at (50, 50)
+        let found = find_node_at_position(&app, Pos2::new(50.0, 50.0));
+        assert_eq!(found, Some(node_key));
+    }
+
+    #[test]
+    fn test_find_node_at_position_with_zoom_and_pan() {
+        let mut app = GraphBrowserApp::new();
+        app.camera.position = Point2D::new(50.0, 50.0);
+        app.camera.zoom = 2.0;
+
+        // Add a node at (100, 100)
+        let node_key = app.graph.add_node("test".to_string(), Point2D::new(100.0, 100.0));
+
+        // (100 - 50) * 2.0 = 100, (100 - 50) * 2.0 = 100
+        let found = find_node_at_position(&app, Pos2::new(100.0, 100.0));
+        assert_eq!(found, Some(node_key));
+    }
+
+    #[test]
+    fn test_find_node_multiple_nodes() {
+        let mut app = GraphBrowserApp::new();
+
+        // Add multiple nodes
+        let node1 = app.graph.add_node("node1".to_string(), Point2D::new(100.0, 100.0));
+        let node2 = app.graph.add_node("node2".to_string(), Point2D::new(200.0, 100.0));
+        let _node3 = app.graph.add_node("node3".to_string(), Point2D::new(100.0, 200.0));
+
+        // Find first node
+        let found = find_node_at_position(&app, Pos2::new(100.0, 100.0));
+        assert_eq!(found, Some(node1));
+
+        // Find second node
+        let found = find_node_at_position(&app, Pos2::new(200.0, 100.0));
+        assert_eq!(found, Some(node2));
+
+        // Between nodes, should find neither
+        let found = find_node_at_position(&app, Pos2::new(150.0, 100.0));
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_find_node_no_nodes() {
+        let app = GraphBrowserApp::new();
+
+        let found = find_node_at_position(&app, Pos2::new(100.0, 100.0));
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn test_pan_graph() {
+        let mut app = GraphBrowserApp::new();
+
+        // Add some nodes
+        let _node1 = app.graph.add_node("node1".to_string(), Point2D::new(100.0, 100.0));
+        let _node2 = app.graph.add_node("node2".to_string(), Point2D::new(200.0, 200.0));
+
+        // Pan the graph
+        pan_graph(&mut app, Vec2::new(50.0, 25.0));
+
+        // Check that all nodes moved
+        let nodes: Vec<_> = app.graph.nodes().collect();
+        assert_eq!(nodes[0].position.x, 150.0);
+        assert_eq!(nodes[0].position.y, 125.0);
+        assert_eq!(nodes[1].position.x, 250.0);
+        assert_eq!(nodes[1].position.y, 225.0);
+    }
+
+    #[test]
+    fn test_pan_graph_empty() {
+        let mut app = GraphBrowserApp::new();
+
+        // Should not panic with no nodes
+        pan_graph(&mut app, Vec2::new(50.0, 25.0));
+    }
 }

@@ -621,7 +621,7 @@ impl Gui {
             if is_graph_view {
                 // === GRAPH VIEW: Only render the spatial graph ===
                 render::render_graph(ctx, &mut self.graph_app);
-                
+
             } else {
                 // === DETAIL VIEW: Only render the webview ===
                 let scale =
@@ -669,6 +669,9 @@ impl Gui {
                     });
                 }
             }
+
+            // Render physics config panel (available in both views)
+            render::render_physics_panel(ctx, &mut self.graph_app);
         });
     }
 

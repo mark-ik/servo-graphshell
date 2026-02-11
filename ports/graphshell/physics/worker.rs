@@ -16,22 +16,25 @@ use std::time::Duration;
 pub enum PhysicsCommand {
     /// Update graph state (full sync, only when structure changes)
     UpdateGraph(Graph),
-    
+
     /// Step physics simulation (lightweight, no clone)
     Step(f32),
-    
+
     /// Toggle physics on/off
     Toggle,
-    
+
     /// Pause physics
     Pause,
-    
+
     /// Resume physics
     Resume,
-    
+
     /// Update viewport size
     UpdateViewport(f32),
-    
+
+    /// Update physics configuration
+    UpdateConfig(PhysicsConfig),
+
     /// Shutdown the worker
     Shutdown,
 }
@@ -117,6 +120,9 @@ fn run_physics_worker(
                 }
                 PhysicsCommand::UpdateViewport(diagonal) => {
                     engine.update_viewport(diagonal);
+                }
+                PhysicsCommand::UpdateConfig(new_config) => {
+                    engine.config = new_config;
                 }
                 PhysicsCommand::Shutdown => {
                     return;

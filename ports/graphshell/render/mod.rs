@@ -8,7 +8,8 @@ use crate::app::{GraphBrowserApp, View};
 use crate::graph::{EdgeStyle, NodeLifecycle};
 use crate::input;
 use crate::input::camera::Camera;
-use egui::{CentralPanel, Color32, Pos2, Stroke, Vec2};
+use crate::physics::PhysicsConfig;
+use egui::{CentralPanel, Color32, Pos2, Stroke, Vec2, Window};
 use euclid::default::Point2D;
 
 /// Render the graph view
@@ -142,7 +143,7 @@ fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
     );
     
     // Draw controls hint
-    let controls_text = "T: Toggle Physics | Home: Toggle View | N: New Node | Del: Delete";
+    let controls_text = "Double-click: Focus Node | T: Toggle Physics | P: Physics Settings | C: Center Camera | Home: Toggle View";
     ui.painter().text(
         ui.available_rect_before_wrap().left_bottom() + Vec2::new(10.0, -10.0),
         egui::Align2::LEFT_BOTTOM,
@@ -150,4 +151,221 @@ fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
         egui::FontId::proportional(10.0),
         Color32::from_rgb(150, 150, 150),
     );
+}
+
+/// Render physics configuration panel
+pub fn render_physics_panel(ctx: &egui::Context, app: &mut GraphBrowserApp) {
+    if !app.show_physics_panel {
+        return;
+    }
+
+    Window::new("Physics Configuration")
+        .default_width(300.0)
+        .show(ctx, |ui| {
+            ui.heading("Force Parameters");
+
+            let mut config = app.physics.config.clone();
+            let mut config_changed = false;
+
+            ui.add_space(8.0);
+
+            // Repulsion strength
+            ui.label("Repulsion Strength:");
+            if ui
+                .add(egui::Slider::new(&mut config.repulsion_strength, 0.0..=20000.0).logarithmic(true))
+                .changed()
+            {
+                config_changed = true;
+            }
+
+            ui.add_space(4.0);
+
+            // Spring strength
+            ui.label("Spring Strength:");
+            if ui
+                .add(egui::Slider::new(&mut config.spring_strength, 0.0..=1.0))
+                .changed()
+            {
+                config_changed = true;
+            }
+
+            ui.add_space(4.0);
+
+            // Spring rest length
+            ui.label("Spring Rest Length:");
+            if ui
+                .add(egui::Slider::new(&mut config.spring_rest_length, 10.0..=500.0))
+                .changed()
+            {
+                config_changed = true;
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            ui.heading("Damping & Convergence");
+            ui.add_space(8.0);
+
+            // Damping
+            ui.label("Velocity Damping:");
+            if ui
+                .add(egui::Slider::new(&mut config.damping, 0.0..=1.0))
+                .changed()
+            {
+                config_changed = true;
+            }
+
+            ui.add_space(4.0);
+
+            // Velocity threshold
+            ui.label("Velocity Threshold:");
+            if ui
+                .add(egui::Slider::new(&mut config.velocity_threshold, 0.0001..=0.1).logarithmic(true))
+                .changed()
+            {
+                config_changed = true;
+            }
+
+            ui.add_space(4.0);
+
+            // Pause delay
+            ui.label("Auto-pause Delay (s):");
+            if ui
+                .add(egui::Slider::new(&mut config.pause_delay, 0.0..=30.0))
+                .changed()
+            {
+                config_changed = true;
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            // Reset button
+            ui.horizontal(|ui| {
+                if ui.button("Reset to Defaults").clicked() {
+                    config = PhysicsConfig::default();
+                    config_changed = true;
+                }
+
+                ui.label(if app.physics.is_running {
+                    "Status: Running"
+                } else {
+                    "Status: Paused"
+                });
+            });
+
+            // Apply config changes
+            if config_changed {
+                app.update_physics_config(config);
+            }
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_egui_pos_no_transform() {
+        let camera = Camera::new(); // position (0,0), zoom 1.0
+        let point = Point2D::new(100.0, 50.0);
+        let pos = to_egui_pos(point, &camera);
+
+        assert_eq!(pos.x, 100.0);
+        assert_eq!(pos.y, 50.0);
+    }
+
+    #[test]
+    fn test_to_egui_pos_with_zoom() {
+        let mut camera = Camera::new();
+        camera.zoom = 2.0; // 2x zoom
+        camera.target_zoom = 2.0;
+
+        let point = Point2D::new(100.0, 50.0);
+        let pos = to_egui_pos(point, &camera);
+
+        // With 2x zoom, positions should be doubled
+        assert_eq!(pos.x, 200.0);
+        assert_eq!(pos.y, 100.0);
+    }
+
+    #[test]
+    fn test_to_egui_pos_with_pan() {
+        let mut camera = Camera::new();
+        camera.position = Point2D::new(50.0, 25.0);
+        camera.target_position = camera.position;
+
+        let point = Point2D::new(100.0, 50.0);
+        let pos = to_egui_pos(point, &camera);
+
+        // With camera at (50, 25), point at (100, 50) should appear at (50, 25)
+        assert_eq!(pos.x, 50.0);
+        assert_eq!(pos.y, 25.0);
+    }
+
+    #[test]
+    fn test_to_egui_pos_with_zoom_and_pan() {
+        let mut camera = Camera::new();
+        camera.position = Point2D::new(50.0, 25.0);
+        camera.target_position = camera.position;
+        camera.zoom = 2.0;
+        camera.target_zoom = 2.0;
+
+        let point = Point2D::new(100.0, 50.0);
+        let pos = to_egui_pos(point, &camera);
+
+        // (100 - 50) * 2.0 = 100, (50 - 25) * 2.0 = 50
+        assert_eq!(pos.x, 100.0);
+        assert_eq!(pos.y, 50.0);
+    }
+
+    #[test]
+    fn test_to_egui_pos_zoom_out() {
+        let mut camera = Camera::new();
+        camera.zoom = 0.5; // 0.5x zoom (zoomed out)
+        camera.target_zoom = 0.5;
+
+        let point = Point2D::new(100.0, 50.0);
+        let pos = to_egui_pos(point, &camera);
+
+        // With 0.5x zoom, positions should be halved
+        assert_eq!(pos.x, 50.0);
+        assert_eq!(pos.y, 25.0);
+    }
+
+    #[test]
+    fn test_to_egui_pos_origin() {
+        let camera = Camera::new();
+        let point = Point2D::new(0.0, 0.0);
+        let pos = to_egui_pos(point, &camera);
+
+        assert_eq!(pos.x, 0.0);
+        assert_eq!(pos.y, 0.0);
+    }
+
+    #[test]
+    fn test_to_egui_pos_negative_coordinates() {
+        let camera = Camera::new();
+        let point = Point2D::new(-100.0, -50.0);
+        let pos = to_egui_pos(point, &camera);
+
+        assert_eq!(pos.x, -100.0);
+        assert_eq!(pos.y, -50.0);
+    }
+
+    #[test]
+    fn test_to_egui_pos_with_negative_pan() {
+        let mut camera = Camera::new();
+        camera.position = Point2D::new(-50.0, -25.0);
+        camera.target_position = camera.position;
+
+        let point = Point2D::new(0.0, 0.0);
+        let pos = to_egui_pos(point, &camera);
+
+        // Point at origin with camera at (-50, -25) should appear at (50, 25)
+        assert_eq!(pos.x, 50.0);
+        assert_eq!(pos.y, 25.0);
+    }
 }

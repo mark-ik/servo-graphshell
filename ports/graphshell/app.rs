@@ -70,6 +70,9 @@ pub struct GraphBrowserApp {
 
     /// Camera for graph navigation (zoom and pan)
     pub camera: Camera,
+
+    /// Whether the physics config panel is open
+    pub show_physics_panel: bool,
 }
 
 impl GraphBrowserApp {
@@ -95,6 +98,7 @@ impl GraphBrowserApp {
             node_to_webview: HashMap::new(),
             is_interacting: false,
             camera: Camera::new(),
+            show_physics_panel: false,
         }
     }
     
@@ -187,6 +191,68 @@ impl GraphBrowserApp {
     /// Update camera (call every frame for smooth interpolation)
     pub fn update_camera(&mut self, dt: f32) {
         self.camera.update(dt);
+    }
+
+    /// Center camera on all nodes in the graph
+    pub fn center_camera(&mut self, viewport_width: f32, viewport_height: f32) {
+        use euclid::default::Point2D;
+
+        // Collect all node positions
+        let positions: Vec<Point2D<f32>> = self.graph.nodes()
+            .map(|n| n.position)
+            .collect();
+
+        // Early return if no nodes
+        if positions.is_empty() {
+            self.camera.target_position = Point2D::new(0.0, 0.0);
+            self.camera.target_zoom = 1.0;
+            return;
+        }
+
+        // Calculate bounding box
+        let min_x = positions.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+        let max_x = positions.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max);
+        let min_y = positions.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let max_y = positions.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+
+        // Calculate centroid
+        let center_x = (min_x + max_x) / 2.0;
+        let center_y = (min_y + max_y) / 2.0;
+
+        // Calculate bounding box size
+        let bbox_width = max_x - min_x;
+        let bbox_height = max_y - min_y;
+
+        // Add padding (20% on each side)
+        let padding = 1.4;
+        let padded_width = bbox_width * padding;
+        let padded_height = bbox_height * padding;
+
+        // Calculate zoom to fit bounding box in viewport
+        // Special case: if bounding box is effectively zero (single node or overlapping nodes),
+        // use max zoom to show detail
+        let target_zoom = if padded_width < 0.1 && padded_height < 0.1 {
+            10.0
+        } else {
+            // Calculate zoom to fit the content
+            let zoom_x = if padded_width > 0.0 {
+                viewport_width / padded_width
+            } else {
+                10.0
+            };
+            let zoom_y = if padded_height > 0.0 {
+                viewport_height / padded_height
+            } else {
+                10.0
+            };
+
+            // Use the smaller zoom to ensure everything fits
+            zoom_x.min(zoom_y).clamp(0.1, 10.0)
+        };
+
+        // Set camera target
+        self.camera.target_position = Point2D::new(center_x, center_y);
+        self.camera.target_zoom = target_zoom;
     }
 
     /// Update physics (call every frame)
@@ -289,6 +355,19 @@ impl GraphBrowserApp {
         }
         self.physics.toggle();
     }
+
+    /// Update physics configuration
+    pub fn update_physics_config(&mut self, config: PhysicsConfig) {
+        if let Some(worker) = &self.physics_worker {
+            worker.send_command(PhysicsCommand::UpdateConfig(config.clone()));
+        }
+        self.physics.config = config;
+    }
+
+    /// Toggle physics config panel visibility
+    pub fn toggle_physics_panel(&mut self) {
+        self.show_physics_panel = !self.show_physics_panel;
+    }
     
     /// Get the node that should be active in detail view (if any)
     pub fn get_active_node(&self) -> Option<NodeKey> {
@@ -337,5 +416,284 @@ impl GraphBrowserApp {
 impl Default for GraphBrowserApp {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use euclid::default::Point2D;
+
+    #[test]
+    fn test_center_camera_no_nodes() {
+        let mut app = GraphBrowserApp::new();
+
+        app.center_camera(800.0, 600.0);
+
+        // Should reset to origin with default zoom
+        assert_eq!(app.camera.target_position.x, 0.0);
+        assert_eq!(app.camera.target_position.y, 0.0);
+        assert_eq!(app.camera.target_zoom, 1.0);
+    }
+
+    #[test]
+    fn test_center_camera_single_node() {
+        let mut app = GraphBrowserApp::new();
+        app.graph.add_node("test".to_string(), Point2D::new(100.0, 200.0));
+
+        app.center_camera(800.0, 600.0);
+
+        // Should center on the single node
+        assert_eq!(app.camera.target_position.x, 100.0);
+        assert_eq!(app.camera.target_position.y, 200.0);
+        // Zoom should be clamped to max (10.0) for a single point
+        assert_eq!(app.camera.target_zoom, 10.0);
+    }
+
+    #[test]
+    fn test_center_camera_multiple_nodes() {
+        let mut app = GraphBrowserApp::new();
+
+        // Create nodes at corners of a square
+        app.graph.add_node("node1".to_string(), Point2D::new(0.0, 0.0));
+        app.graph.add_node("node2".to_string(), Point2D::new(100.0, 0.0));
+        app.graph.add_node("node3".to_string(), Point2D::new(0.0, 100.0));
+        app.graph.add_node("node4".to_string(), Point2D::new(100.0, 100.0));
+
+        app.center_camera(800.0, 600.0);
+
+        // Should center on centroid (50, 50)
+        assert_eq!(app.camera.target_position.x, 50.0);
+        assert_eq!(app.camera.target_position.y, 50.0);
+
+        // Zoom should fit the bounding box with padding
+        // bbox: 100x100, padded: 140x140
+        // zoom_x = 800 / 140 = 5.71, zoom_y = 600 / 140 = 4.29
+        // Should use smaller zoom (4.29) to fit both dimensions
+        assert!((app.camera.target_zoom - 4.285714).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_center_camera_negative_coordinates() {
+        let mut app = GraphBrowserApp::new();
+
+        app.graph.add_node("node1".to_string(), Point2D::new(-50.0, -50.0));
+        app.graph.add_node("node2".to_string(), Point2D::new(50.0, 50.0));
+
+        app.center_camera(800.0, 600.0);
+
+        // Should center on origin (midpoint of -50,-50 and 50,50)
+        assert_eq!(app.camera.target_position.x, 0.0);
+        assert_eq!(app.camera.target_position.y, 0.0);
+    }
+
+    #[test]
+    fn test_center_camera_zoom_clamp_min() {
+        let mut app = GraphBrowserApp::new();
+
+        // Create very spread out nodes
+        app.graph.add_node("node1".to_string(), Point2D::new(0.0, 0.0));
+        app.graph.add_node("node2".to_string(), Point2D::new(10000.0, 10000.0));
+
+        app.center_camera(800.0, 600.0);
+
+        // Zoom should be clamped to minimum (0.1)
+        assert_eq!(app.camera.target_zoom, 0.1);
+    }
+
+    #[test]
+    fn test_center_camera_zoom_clamp_max() {
+        let mut app = GraphBrowserApp::new();
+
+        // Create very close nodes
+        app.graph.add_node("node1".to_string(), Point2D::new(100.0, 100.0));
+        app.graph.add_node("node2".to_string(), Point2D::new(100.1, 100.1));
+
+        app.center_camera(800.0, 600.0);
+
+        // Zoom should be clamped to maximum (10.0)
+        assert_eq!(app.camera.target_zoom, 10.0);
+    }
+
+    #[test]
+    fn test_center_camera_asymmetric_viewport() {
+        let mut app = GraphBrowserApp::new();
+
+        // Create nodes in a wide rectangle
+        app.graph.add_node("node1".to_string(), Point2D::new(0.0, 0.0));
+        app.graph.add_node("node2".to_string(), Point2D::new(200.0, 50.0));
+
+        app.center_camera(800.0, 400.0);
+
+        // Should center on (100, 25)
+        assert_eq!(app.camera.target_position.x, 100.0);
+        assert_eq!(app.camera.target_position.y, 25.0);
+
+        // Should use zoom that fits the wider dimension
+        // bbox: 200x50, padded: 280x70
+        // zoom_x = 800 / 280 = 2.857, zoom_y = 400 / 70 = 5.714
+        // Should use smaller zoom (2.857)
+        assert!((app.camera.target_zoom - 2.857142).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_center_camera_preserves_smooth_interpolation() {
+        let mut app = GraphBrowserApp::new();
+
+        // Set initial camera position
+        app.camera.position = Point2D::new(50.0, 50.0);
+        app.camera.target_position = app.camera.position;
+        app.camera.zoom = 2.0;
+        app.camera.target_zoom = 2.0;
+
+        app.graph.add_node("node1".to_string(), Point2D::new(100.0, 100.0));
+
+        app.center_camera(800.0, 600.0);
+
+        // Target should change immediately
+        assert_eq!(app.camera.target_position.x, 100.0);
+        assert_eq!(app.camera.target_position.y, 100.0);
+
+        // But actual position should still be at old value (smooth interpolation)
+        assert_eq!(app.camera.position.x, 50.0);
+        assert_eq!(app.camera.position.y, 50.0);
+        assert_eq!(app.camera.zoom, 2.0);
+    }
+
+    #[test]
+    fn test_center_camera_horizontal_line() {
+        let mut app = GraphBrowserApp::new();
+
+        // Create nodes in a horizontal line (same y, different x)
+        app.graph.add_node("node1".to_string(), Point2D::new(0.0, 100.0));
+        app.graph.add_node("node2".to_string(), Point2D::new(200.0, 100.0));
+        app.graph.add_node("node3".to_string(), Point2D::new(400.0, 100.0));
+
+        app.center_camera(800.0, 600.0);
+
+        // Should center on (200, 100)
+        assert_eq!(app.camera.target_position.x, 200.0);
+        assert_eq!(app.camera.target_position.y, 100.0);
+
+        // bbox: 400x0, padded: 560x0
+        // zoom_x = 800 / 560 = 1.428, zoom_y = 10.0 (height is 0)
+        // Should use smaller zoom (1.428)
+        assert!((app.camera.target_zoom - 1.428571).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_center_camera_vertical_line() {
+        let mut app = GraphBrowserApp::new();
+
+        // Create nodes in a vertical line (same x, different y)
+        app.graph.add_node("node1".to_string(), Point2D::new(100.0, 0.0));
+        app.graph.add_node("node2".to_string(), Point2D::new(100.0, 200.0));
+        app.graph.add_node("node3".to_string(), Point2D::new(100.0, 400.0));
+
+        app.center_camera(800.0, 600.0);
+
+        // Should center on (100, 200)
+        assert_eq!(app.camera.target_position.x, 100.0);
+        assert_eq!(app.camera.target_position.y, 200.0);
+
+        // bbox: 0x400, padded: 0x560
+        // zoom_x = 10.0 (width is 0), zoom_y = 600 / 560 = 1.071
+        // Should use smaller zoom (1.071)
+        assert!((app.camera.target_zoom - 1.071428).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_center_camera_all_nodes_same_position() {
+        let mut app = GraphBrowserApp::new();
+
+        // Create multiple nodes all at the exact same position
+        app.graph.add_node("node1".to_string(), Point2D::new(150.0, 250.0));
+        app.graph.add_node("node2".to_string(), Point2D::new(150.0, 250.0));
+        app.graph.add_node("node3".to_string(), Point2D::new(150.0, 250.0));
+
+        app.center_camera(800.0, 600.0);
+
+        // Should center on the shared position
+        assert_eq!(app.camera.target_position.x, 150.0);
+        assert_eq!(app.camera.target_position.y, 250.0);
+
+        // Bounding box is zero, should use max zoom
+        assert_eq!(app.camera.target_zoom, 10.0);
+    }
+
+    #[test]
+    fn test_focus_node_switches_to_detail_view() {
+        let mut app = GraphBrowserApp::new();
+        let node_key = app.graph.add_node("test".to_string(), Point2D::new(100.0, 100.0));
+
+        // Initially in graph view
+        assert!(matches!(app.view, View::Graph));
+
+        // Focus on node should switch to detail view
+        app.focus_node(node_key);
+        assert!(matches!(app.view, View::Detail(key) if key == node_key));
+
+        // Node should be selected
+        assert!(app.selected_nodes.contains(&node_key));
+    }
+
+    #[test]
+    fn test_toggle_view_from_graph_to_detail() {
+        let mut app = GraphBrowserApp::new();
+        let node_key = app.graph.add_node("test".to_string(), Point2D::new(100.0, 100.0));
+
+        // Select a node
+        app.select_node(node_key, false);
+
+        // Toggle view should switch to detail view of selected node
+        app.toggle_view();
+        assert!(matches!(app.view, View::Detail(key) if key == node_key));
+    }
+
+    #[test]
+    fn test_toggle_view_from_detail_to_graph() {
+        let mut app = GraphBrowserApp::new();
+        let node_key = app.graph.add_node("test".to_string(), Point2D::new(100.0, 100.0));
+
+        // Switch to detail view
+        app.focus_node(node_key);
+        assert!(matches!(app.view, View::Detail(_)));
+
+        // Toggle view should switch back to graph view
+        app.toggle_view();
+        assert!(matches!(app.view, View::Graph));
+    }
+
+    #[test]
+    fn test_toggle_view_no_nodes() {
+        let mut app = GraphBrowserApp::new();
+
+        // Toggle view with no nodes should stay in graph view
+        app.toggle_view();
+        assert!(matches!(app.view, View::Graph));
+    }
+
+    #[test]
+    fn test_toggle_view_no_selection() {
+        let mut app = GraphBrowserApp::new();
+        let node1 = app.graph.add_node("node1".to_string(), Point2D::new(100.0, 100.0));
+        let _node2 = app.graph.add_node("node2".to_string(), Point2D::new(200.0, 200.0));
+
+        // Toggle view without selection should focus on first node
+        app.toggle_view();
+        assert!(matches!(app.view, View::Detail(key) if key == node1));
+    }
+
+    #[test]
+    fn test_get_active_node() {
+        let mut app = GraphBrowserApp::new();
+        let node_key = app.graph.add_node("test".to_string(), Point2D::new(100.0, 100.0));
+
+        // In graph view, no active node
+        assert_eq!(app.get_active_node(), None);
+
+        // In detail view, active node is the focused node
+        app.focus_node(node_key);
+        assert_eq!(app.get_active_node(), Some(node_key));
     }
 }

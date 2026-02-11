@@ -206,3 +206,267 @@ impl PhysicsEngine {
         self.is_running = false;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{EdgeType, Graph};
+    use euclid::default::Point2D;
+
+    #[test]
+    fn test_physics_config_default() {
+        let config = PhysicsConfig::default();
+        assert_eq!(config.repulsion_strength, 5000.0);
+        assert_eq!(config.spring_strength, 0.1);
+        assert_eq!(config.damping, 0.92);
+        assert_eq!(config.spring_rest_length, 100.0);
+        assert_eq!(config.velocity_threshold, 0.001);
+        assert_eq!(config.pause_delay, 5.0);
+    }
+
+    #[test]
+    fn test_physics_engine_new() {
+        let config = PhysicsConfig::default();
+        let engine = PhysicsEngine::new(config, 1000.0);
+
+        assert!(engine.is_running);
+        assert_eq!(engine.low_velocity_time, 0.0);
+    }
+
+    #[test]
+    fn test_physics_toggle() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+
+        // Initially running
+        assert!(engine.is_running);
+
+        // Toggle off
+        engine.toggle();
+        assert!(!engine.is_running);
+
+        // Toggle back on
+        engine.toggle();
+        assert!(engine.is_running);
+        assert_eq!(engine.low_velocity_time, 0.0);
+    }
+
+    #[test]
+    fn test_physics_pause() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+
+        assert!(engine.is_running);
+        engine.pause();
+        assert!(!engine.is_running);
+    }
+
+    #[test]
+    fn test_physics_resume() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+
+        engine.pause();
+        assert!(!engine.is_running);
+
+        engine.resume();
+        assert!(engine.is_running);
+        assert_eq!(engine.low_velocity_time, 0.0);
+    }
+
+    #[test]
+    fn test_physics_step_when_paused() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+        let mut graph = Graph::new();
+
+        let node = graph.add_node("https://a.com".to_string(), Point2D::new(100.0, 100.0));
+        let initial_pos = graph.get_node(node).unwrap().position;
+
+        // Pause and step
+        engine.pause();
+        engine.step(&mut graph, 0.016);
+
+        // Position should not change when paused
+        let final_pos = graph.get_node(node).unwrap().position;
+        assert_eq!(initial_pos.x, final_pos.x);
+        assert_eq!(initial_pos.y, final_pos.y);
+    }
+
+    #[test]
+    fn test_physics_step_applies_forces() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+        let mut graph = Graph::new();
+
+        // Create two nodes close together (repulsion should push them apart)
+        let node1 = graph.add_node("https://a.com".to_string(), Point2D::new(100.0, 100.0));
+        let node2 = graph.add_node("https://b.com".to_string(), Point2D::new(105.0, 100.0));
+
+        let pos1_before = graph.get_node(node1).unwrap().position;
+        let pos2_before = graph.get_node(node2).unwrap().position;
+
+        // Run physics for a few steps
+        for _ in 0..10 {
+            engine.step(&mut graph, 0.016);
+        }
+
+        let pos1_after = graph.get_node(node1).unwrap().position;
+        let pos2_after = graph.get_node(node2).unwrap().position;
+
+        // Nodes should have moved (repulsion)
+        assert!(pos1_after.x != pos1_before.x || pos1_after.y != pos1_before.y);
+        assert!(pos2_after.x != pos2_before.x || pos2_after.y != pos2_before.y);
+
+        // Distance between nodes should have increased
+        let dist_before = (pos2_before - pos1_before).length();
+        let dist_after = (pos2_after - pos1_after).length();
+        assert!(dist_after > dist_before);
+    }
+
+    #[test]
+    fn test_physics_step_with_edge_attraction() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+        let mut graph = Graph::new();
+
+        // Create two nodes far apart with an edge (spring should pull them together)
+        let node1 = graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
+        let node2 = graph.add_node("https://b.com".to_string(), Point2D::new(500.0, 0.0));
+        graph.add_edge(node1, node2, EdgeType::Hyperlink);
+
+        let pos1_before = graph.get_node(node1).unwrap().position;
+        let pos2_before = graph.get_node(node2).unwrap().position;
+
+        // Run physics for a few steps
+        for _ in 0..10 {
+            engine.step(&mut graph, 0.016);
+        }
+
+        let pos1_after = graph.get_node(node1).unwrap().position;
+        let pos2_after = graph.get_node(node2).unwrap().position;
+
+        // Distance between nodes should have decreased (spring attraction)
+        let dist_before = (pos2_before - pos1_before).length();
+        let dist_after = (pos2_after - pos1_after).length();
+        assert!(dist_after < dist_before);
+    }
+
+    #[test]
+    fn test_physics_pinned_nodes_dont_move() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+        let mut graph = Graph::new();
+
+        // Create pinned and unpinned nodes connected by an edge
+        let pinned = graph.add_node("https://pinned.com".to_string(), Point2D::new(100.0, 100.0));
+        let unpinned = graph.add_node("https://unpinned.com".to_string(), Point2D::new(500.0, 100.0));
+
+        // Connect them with an edge (spring force)
+        graph.add_edge(pinned, unpinned, EdgeType::Hyperlink);
+
+        // Pin one node
+        graph.get_node_mut(pinned).unwrap().is_pinned = true;
+
+        let pinned_pos_before = graph.get_node(pinned).unwrap().position;
+        let unpinned_pos_before = graph.get_node(unpinned).unwrap().position;
+
+        // Run physics - spring force should pull unpinned node toward pinned node
+        for _ in 0..20 {
+            engine.step(&mut graph, 0.016);
+        }
+
+        let pinned_pos_after = graph.get_node(pinned).unwrap().position;
+        let unpinned_pos_after = graph.get_node(unpinned).unwrap().position;
+
+        // Pinned node should not move despite spring force
+        assert_eq!(pinned_pos_before.x, pinned_pos_after.x);
+        assert_eq!(pinned_pos_before.y, pinned_pos_after.y);
+
+        // Unpinned node should move (attracted by spring to pinned node)
+        let dist_before = (unpinned_pos_before - pinned_pos_before).length();
+        let dist_after = (unpinned_pos_after - pinned_pos_after).length();
+        assert!(dist_after < dist_before, "Unpinned node should move toward pinned node via spring");
+    }
+
+    #[test]
+    fn test_physics_damping_reduces_velocity() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+        let mut graph = Graph::new();
+
+        let node = graph.add_node("https://a.com".to_string(), Point2D::new(100.0, 100.0));
+
+        // Give node initial velocity
+        graph.get_node_mut(node).unwrap().velocity = Vector2D::new(100.0, 0.0);
+
+        // Run physics (no forces, just damping)
+        for _ in 0..5 {
+            engine.step(&mut graph, 0.016);
+        }
+
+        // Velocity should be reduced by damping
+        let velocity = graph.get_node(node).unwrap().velocity;
+        assert!(velocity.length() < 100.0);
+    }
+
+    #[test]
+    fn test_physics_auto_pause() {
+        let mut config = PhysicsConfig::default();
+        config.velocity_threshold = 1.0; // Higher threshold for faster test
+        config.pause_delay = 0.1; // Shorter delay
+
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+        let mut graph = Graph::new();
+
+        // Create a node with very low velocity
+        let node = graph.add_node("https://a.com".to_string(), Point2D::new(100.0, 100.0));
+        graph.get_node_mut(node).unwrap().velocity = Vector2D::new(0.1, 0.0);
+
+        assert!(engine.is_running);
+
+        // Step multiple times with low velocity
+        for _ in 0..10 {
+            engine.step(&mut graph, 0.016);
+        }
+
+        // Should auto-pause after enough time with low velocity
+        assert!(!engine.is_running);
+    }
+
+    #[test]
+    fn test_physics_auto_pause_resets_on_high_velocity() {
+        let mut config = PhysicsConfig::default();
+        config.velocity_threshold = 1.0;
+        let pause_delay = 1.0;
+        config.pause_delay = pause_delay;
+
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+        let mut graph = Graph::new();
+
+        // Create two nodes that will repel each other
+        let _node1 = graph.add_node("https://a.com".to_string(), Point2D::new(100.0, 100.0));
+        let _node2 = graph.add_node("https://b.com".to_string(), Point2D::new(101.0, 100.0));
+
+        // Step a few times (high velocity due to repulsion)
+        for _ in 0..5 {
+            engine.step(&mut graph, 0.016);
+        }
+
+        // Should still be running due to high velocity
+        assert!(engine.is_running);
+        assert!(engine.low_velocity_time < pause_delay);
+    }
+
+    #[test]
+    fn test_update_viewport() {
+        let config = PhysicsConfig::default();
+        let mut engine = PhysicsEngine::new(config, 1000.0);
+
+        // Update viewport (just make sure it doesn't panic)
+        engine.update_viewport(2000.0);
+
+        // Engine should still be functional
+        assert!(engine.is_running);
+    }
+}
