@@ -1,7 +1,7 @@
 # Graphshell Architectural Overview
 
-**Last Updated**: February 9, 2026  
-**Status**: Foundation implemented, Servo integration in progress  
+**Last Updated**: February 11, 2026
+**Status**: Core browsing graph functional — Servo integration, persistence, zoom/camera, physics all working
 
 ---
 
@@ -15,92 +15,85 @@ Graphshell is a **spatial browser** where webpages are nodes in a force-directed
 
 ## Current Implementation Status
 
-### ✅ Foundation Complete (~3,500 LOC)
+### Foundation (~4,500 LOC across graphshell-specific modules)
 
-**Graph Core** (`graph/mod.rs`, 271 lines)
-- `Graph`: SlotMap-based storage for stable node/edge handles
-- `Node`: URL, title, position, velocity, selection state, lifecycle (Active/Warm/Cold)
-- `Edge`: Connections with types (Hyperlink, Bookmark, History, Manual) and styles
-- `NodeKey`/`EdgeKey`: Stable identifiers that survive deletions
-- URL-to-NodeKey HashMap for O(1) lookup
+**Graph Core** (`graph/mod.rs`, 564 lines)
+- `Graph`: petgraph `StableGraph<Node, EdgeType, Directed>` as primary store
+- `Node`: URL, title, position, velocity, selection, pinned, lifecycle (Active/Cold)
+- `EdgeType`: Hyperlink (link click), History (back/forward)
+- `NodeKey = NodeIndex`, `EdgeKey = EdgeIndex` — stable handles surviving deletions
+- `url_to_node: HashMap<String, NodeKey>` for O(1) URL lookup
+- `out_neighbors()`, `in_neighbors()`, `has_edge_between()` for traversal
+- Snapshot serialization: `to_snapshot()` / `from_snapshot()` for persistence
 
-**Physics Engine** (`physics/mod.rs`, 209 lines)
+**egui_graphs Adapter** (`graph/egui_adapter.rs`, 198 lines)
+- `EguiGraphState`: converts `Graph` → egui_graphs `Graph` via `to_graph_custom()`
+- Sets position, label, color, radius, selection from node data
+- Lifecycle-based styling: Active (blue, r=15), Cold (gray, r=10), Selected (gold)
+- Rebuilt only when `egui_state_dirty` flag is set (structural changes)
+
+**Physics Engine** (`physics/mod.rs`, 458 lines)
 - Force-directed layout: repulsion (spatial hash O(n)), spring attraction (Hooke's law), damping
-- Auto-pause on convergence (monitors max velocity, pauses after 5s below threshold)
-- Configurable parameters: repulsion 5000.0, spring 0.1, damping 0.92, rest length 100px
-- Spatial hash grid for efficient neighbor queries (~300px radius)
+- Auto-pause on convergence (monitors max velocity, pauses after configurable delay)
+- Configurable: repulsion 5000.0, spring 0.1, damping 0.92, rest length 100px, repulsion radius 300px
+- Spatial grid (`spatial.rs`): kiddo KD-tree for efficient neighbor queries
 
-**Physics Worker** (`physics/worker.rs`, 150 lines)
+**Physics Worker** (`physics/worker.rs`, 261 lines)
 - Background thread using `crossbeam_channel` for non-blocking simulation
-- Commands: UpdateGraph, Step, Toggle, Pause, Resume, UpdateViewport, Shutdown
+- Commands: UpdateGraph, Step, Toggle, Pause, Resume, UpdateConfig, Shutdown
 - Responses: NodePositions (HashMap updates), IsRunning status
-- Runs at 60 FPS target, sends position updates back to main thread
+- 60 FPS target, sends position updates back to main thread
 
-**Rendering** (`render/mod.rs`, 145 lines)
-- egui immediate-mode UI
-- Draws nodes (circles, lifecycle-based colors/sizes) and edges (straight lines, typed/styled)
-- Labels truncated to 20 chars below each node
-- Selection highlighting (yellow), pinned nodes (red border)
-- Dark background (RGB 20, 20, 25)
+**Rendering** (`render/mod.rs`, 381 lines)
+- Delegates graph visualization to `egui_graphs::GraphView` widget
+- Built-in zoom/pan navigation (`SettingsNavigation`), dragging + selection (`SettingsInteraction`)
+- Event-driven: NodeDoubleClick → focus, NodeDragStart/End → physics pause, NodeMove → position sync
+- Info overlay: node/edge count, physics status, zoom level, controls hint
+- Physics config panel: live sliders for all force parameters
+- Post-frame zoom clamp: enforces min/max bounds on egui_graphs zoom
 
-**Input** (`input/mod.rs`, ~150 lines)
-- **Mouse**: Click select, Shift multi-select, drag nodes, pan graph (when not dragging node), double-click to focus (switch to Detail view)
-- **Keyboard**: `T` toggle physics, `Home`/`Esc` toggle view, `C` center camera (TODO)
-- Pauses physics while user is interacting (dragging)
+**Input** (`input/mod.rs`, 100 lines)
+- Mouse interaction delegated to egui_graphs (drag, pan, zoom, selection, double-click)
+- Keyboard shortcuts (guarded — disabled when text field has focus):
+  - `T` toggle physics, `C` fit to screen, `P` physics panel, `N` new node
+  - `Home`/`Esc` toggle Graph/Detail view
+  - `Del` remove selected, `Ctrl+Shift+Del` clear graph
 
-**Camera** (`input/camera.rs`, ~60 lines)
-- Pan and zoom with smooth interpolation (lerp factor 10.0 * dt)
-- Structure complete, but **zoom not integrated** into egui rendering transform yet
-
-**Application** (`app.rs`, 332 lines)
+**Application State** (`app.rs`, 678 lines)
 - View model: `View::Graph` or `View::Detail(NodeKey)`
-- Split view config (enabled, detail_ratio 0.6)
 - Bidirectional webview↔node mapping: `HashMap<WebViewId, NodeKey>` and inverse
 - Selection management (single/multi), focus switching
-- Demo graph initialization (5 static nodes)
+- Physics worker lifecycle (sync graph, receive positions)
+- Persistence integration: log mutations, periodic snapshots
+- `egui_state_dirty` flag controls when egui_graphs state is rebuilt
+- Camera: zoom bounds (0.1x–10.0x), post-frame clamping via `MetadataFrame`
 
-### ⚠️ Partial / Needs Integration
+**Persistence** (`persistence/mod.rs` + `types.rs`, 636 lines)
+- **fjall**: Append-only operation log (every mutation: AddNode, AddEdge, UpdateTitle, PinNode)
+- **redb**: Periodic snapshots (full graph serialization, every 5 minutes)
+- **rkyv**: Zero-copy serialization for both log entries and snapshots
+- Startup recovery: load latest snapshot → replay log entries since snapshot
+- Aligned data handling: `AlignedVec` for rkyv deserialization from redb bytes
 
-**Servo Integration**
-- Webview lifecycle structs defined (Active/Warm/Cold)
-- Mapping structures exist
-- **Missing**: Actual Servo webview creation, destruction, thumbnail capture, navigation hooks
+**Servo Integration** (`desktop/gui.rs`, 1096 lines)
+- Full webview lifecycle: create/destroy webviews based on view state
+- Graph view: destroy all webviews (prevent framebuffer bleed), save node list for restoration
+- Detail view: recreate webviews for saved nodes, create for newly focused nodes
+- Navigation tracking: `sync_webviews_to_graph()` detects URL changes, creates nodes + edges
+- URL bar: Enter in graph view updates node URL and switches to detail view
+- Edge creation: Hyperlink for new navigation, History for back/forward (detected by existing reverse edge)
 
-**Camera Zoom**
-- `Camera::zoom()` method exists and updates `target_zoom`
-- **Missing**: Integration with egui coordinate transform (not applied in rendering yet)
+### Not Yet Implemented
 
-**Center Camera**
-- Keyboard binding exists (C key)
-- **Missing**: Algorithm to calculate graph centroid and move camera
+**Planned for Phase 1 completion:**
+1. **Thumbnails & Favicon Rendering** — Nodes show page screenshots or favicons instead of colored circles
 
-### ❌ Not Implemented
-
-**Critical for MVP:**
-1. **Graph Persistence** (`graph/persistence.rs` - empty stubs)
-   - save_snapshot() and load_graph() marked "Week 6 milestone"
-   - Need: Snapshot + append-only log strategy for crash recovery
-
-2. **Servo Webview Integration**
-   - Create webview for each node
-   - Capture thumbnails after page load
-   - Handle navigation events (create new nodes on link clicks)
-   - Manage webview lifecycle (Active → Warm → Cold transitions)
-
-3. **Thumbnail Display**
-   - Render captured page thumbnails instead of colored circles
-   - Fallback to colored circles for Cold nodes
-
-**Planned Features** (from PROJECT_DESCRIPTION, all unimplemented):
-- Clipping (DOM element extraction)
-- Search/filtering
-- Lasso zoning
-- 2D/3D canvas switching
-- Minimap
-- Export (JSON, DOT, interactive HTML)
+**Phase 2+ features (not started):**
+- Search/filtering (nucleo fuzzy search)
 - Bookmarks/history import
-- Undo/redo
-- Mods/plugins
+- Clipping (DOM element extraction)
+- Split view (egui_tiles)
+- Diagnostic/Engine Inspector mode
 - P2P collaboration (Verse)
 
 ---
@@ -109,185 +102,89 @@ Graphshell is a **spatial browser** where webpages are nodes in a force-directed
 
 ### Data Structures
 
-**Why SlotMap?**
-- Stable handles across deletions (NodeKey remains valid)
-- O(1) access by key
-- Memory efficient (no heap fragmentation from Vec holes)
-- Better than `HashMap<UUID, Node>` (no hashing overhead, tighter packing)
-
-**Why Separate Graph/Edge Storage?**
-- Allows O(1) edge lookup by EdgeKey
-- Enables edge metadata (style, color, creation time)
-- Nodes store edge lists (in_edges, out_edges) for quick traversal
+**Why petgraph StableGraph?**
+- Stable indices survive node/edge deletions (unlike `Graph` which reuses indices)
+- Rich algorithm ecosystem (pathfinding, centrality, clustering) available via trait imports
+- `pub(crate) inner` gives egui_adapter direct access for `to_graph_custom()`
+- Eliminates the SlotMap + manual adjacency list approach (simpler, fewer data structures)
 
 **Why URL-to-NodeKey HashMap?**
 - Fast duplicate detection: "Does this URL already have a node?"
-- Prevents creating duplicate nodes when user revisits pages
+- O(1) lookup for persistence recovery (log replay uses URLs as stable identity)
 
-### Physics & Performance
-
-**Why Spatial Hash?**
-- Repulsion is O(n²) naive (check every pair)
-- Spatial hash reduces to O(n) average case (only check nearby nodes within ~300px)
-- Cell size = viewport_diagonal / 4.0 (auto-scales to screen size)
-
-**Why Worker Thread?**
-- Physics simulation can't block rendering (60 FPS requirement)
-- Worker runs physics in parallel, sends position updates via channel
-- Main thread applies updates only when available (doesn't wait)
-
-**Why Auto-Pause?**
-- Graph converges to stable state after ~5-10 seconds
-- Unnecessary to keep simulating when max velocity < 0.001 px/frame
-- Saves CPU, extends battery life
-- Resumes on any interaction (drag, new node, toggle)
+**Why NodeIndex keys not stable across sessions?**
+- petgraph NodeIndex values change when graph is rebuilt from persistence
+- URL-based identity used for persistence (snapshot + log use URLs, not indices)
 
 ### Rendering & UI
 
-**Why egui?**
-- Immediate-mode: no state synchronization between data and UI
-- Fast iteration: code changes reflect instantly
-- Already integrated with Servo's servoshell (used for debug UI)
-- Cross-platform (Win/Linux/macOS/Android/OpenHarmony) out of the box
-- No HTML/CSS overhead for graph UI
+**Why egui_graphs?**
+- Purpose-built for interactive graph visualization in egui
+- Provides zoom/pan, dragging, selection, labels out of the box
+- Event-driven interaction model (events collected in `Rc<RefCell<Vec<Event>>>`)
+- Reduced custom rendering code by ~80% (input went from 313 → 100 LOC)
 
-**Why Straight Edges (Not Bundled)?**
-- Simple to implement (Week 1-4)
-- Readable for small graphs (<100 nodes)
-- Upgrade to bundled edges if needed in Week 9 (performance validation gate)
+**Why `LayoutRandom` (no-op layout)?**
+- Our custom physics engine controls node positions
+- egui_graphs just renders whatever positions we set
+- Positions synced from physics worker every frame
 
-**Why Lifecycle Colors?**
-- Active (blue): User knows webview is running
-- Warm (purple): Hint that process is alive but hidden
-- Cold (gray): Visual cue that clicking will take time (needs to spawn process)
+**Why post-frame zoom clamp?**
+- egui_graphs has no built-in zoom bounds
+- Read `MetadataFrame` from egui's persisted data after `GraphView` renders
+- Clamp zoom value, write back if changed
 
-### View Model
+### Webview Lifecycle
 
-**Why Graph/Detail Toggle (Not Split by Default)?**
-- Maximizes graph space (most important UX)
-- Users can enable split view in settings if desired (detail_ratio 0.6)
-- Keyboard-driven workflow: Esc returns to graph, double-click focuses node
+**Why destroy webviews in graph view?**
+- Servo renders webviews into the window framebuffer
+- In graph view, webview content bleeds through the graph overlay
+- Solution: save which nodes had webviews, destroy all, recreate on return to detail view
 
-**Why Bidirectional Mapping?**
-- Node → WebViewId: "Which webview renders this node?"
-- WebViewId → NodeKey: "Which node owns this webview?" (for navigation events)
-- Enables reuse: Warm nodes can have their webview reassigned to a different node
+**Why the frame execution order matters (gui.rs):**
+1. Handle keyboard (may change view or clear graph)
+2. Webview lifecycle (destroy/create based on current view)
+3. Sync webviews to graph (only in detail view — detects URL changes, creates edges)
+4. Toolbar + tab bar rendering
+5. Physics update
+6. View rendering (graph OR detail, exclusive)
 
----
+If sync runs before lifecycle or in graph view, it sees stale webviews and creates phantom nodes. This ordering was the root cause of two bugs (clear_graph not working, edges not being created properly).
 
-## Key Remaining Challenges
+### Persistence
 
-### 1. Servo Integration
-
-**Problem**: Servo's API expects traditional tab-based UI.
-
-**Solution**:
-- Use servoshell's EventLoop + WindowMethods as foundation
-- Create multiple WebViewId instances (one per Active node, pool of 2-4 for Warm)
-- Hide/show webviews based on node focus (only render Active/focused node)
-- Hook `send_window_event()` to detect navigation → create new nodes
-
-**Open Questions**:
-- How to capture thumbnails? (use `webrender::screen_capture` after layout completes)
-- How to detect link clicks? (intercept navigation events, create edge + new node)
-- How to manage memory with 50+ webviews? (use lifecycle: keep 1 Active, 3-5 Warm, rest Cold)
-
-### 2. Graph Persistence
-
-**Recommended Approach** (from checkpoint analyses):
-- **fjall**: Append-only operation log (LSM-tree, ACID, pure Rust)
-- **redb**: Snapshot storage (KV store, faster than sled, ACID transactions)
-- **rkyv**: Zero-copy serialization (fastest, mmap-friendly)
-
-**Architecture**:
-```
-[Runtime] --serialize--> [fjall log] (every mutation)
-          --snapshot-->  [redb] (every 5 min or shutdown)
-[Startup] --load snapshot--> --replay log--> [Recovered Graph]
-```
-
-### 3. Camera Zoom Rendering
-
-**Problem**: `Camera::zoom()` updates `target_zoom` but egui rendering doesn't apply transform.
-
-**Solution**: In `render_graph()`, wrap painter calls in coordinate transform:
-```rust
-let zoom = app.camera.zoom;
-let offset = app.camera.position;
-// Transform all positions: screen_pos = (world_pos - offset) * zoom
-```
-
-### 4. Performance Validation (Week 9 Gate)
-
-**Target**: 200 nodes @ 60fps, 500 @ 45fps, 1000 @ 30+fps (usable)
-
-**If Not Met**:
-- Upgrade to bundled edges (reduce overdraw)
-- LOD (level-of-detail): cluster distant nodes, expand on zoom
-- Cull off-screen nodes (simple rect test)
-- Batch rendering (draw all nodes in single call)
-
-**Fallback Plan**:
-- If spatial UX doesn't scale, pivot to "cluster strip" (groups along timeline) + graph as optional view
+**Why fjall + redb + rkyv?**
+- **fjall**: LSM-tree append log, write-optimized, ACID, pure Rust — every mutation logged
+- **redb**: B-tree KV store, faster than sled, ACID — periodic full snapshots
+- **rkyv**: Zero-copy serialization, fastest in Rust — used for both log and snapshot format
+- Recovery: load latest redb snapshot, replay fjall log entries since snapshot timestamp
+- Aligned data: redb bytes aren't aligned for rkyv; copy to `AlignedVec` before deserializing
 
 ---
 
-## Diagnostic Mode (Engine Inspector) - Phase 3+ Feature
+## Key Crates
 
-**Concept** (from Gemini analysis): Visualize Servo's internal architecture (Constellation, threads, IPC channels) as a graph.
-
-**Use Cases**:
-- **Developers**: Debug Servo performance, identify bottlenecks, trace message flow
-- **Users**: Understand browser internals, educational tool, transparency
-
-**Architecture**:
-- **Instrumentation**: Add `tracing` spans to Servo's constellation, script, layout threads
-- **Graph Model**: Nodes = threads/components, Edges = IPC channels (color by latency/load)
-- **UI**: Same graph rendering, different data source (switch mode with hotkey)
-- **Extension Framework**: Telemetry plugins can add custom metrics/visualizations
-
-**Technical Approach**:
-1. Instrument Servo with `tracing::span!()` at thread/channel boundaries
-2. Collect events in GraphShell layer (subscribe to tracing spans)
-3. Build dynamic graph: `ThreadId → Node`, `Channel → Edge`
-4. Visualize message counts, latencies, backpressure as edge weights/colors
-5. Support snapshots for performance reports (export SVG via `visgraph`)
-
-**Relationship to Browsing Graph**:
-- **Separate mode** (toggle with hotkey, e.g., Ctrl+Shift+D)
-- Different graph structure (not webpages, but engine components)
-- Shares rendering/physics infrastructure (reuse graph UI code)
-- Could run simultaneously: split-screen with browsing graph on left, engine graph on right
-
-**Benefits**:
-- Educational: See how a browser engine works in real-time
-- Debugging: Identify slow threads, stuck processes, IPC bottlenecks
-- Transparency: Users understand what their browser is doing
-- Extensibility: Framework for other diagnostic plugins (memory profiler, JS profiler)
-
-**Phase 3 Milestone** (Weeks 13-16):
-- Add tracing instrumentation to key Servo components
-- Implement mode toggle in GraphShell
-- Create engine graph builder (ThreadId/Channel → Node/Edge)
-- Demonstrate basic visualization (threads + message counts)
+| Crate | Purpose | Notes |
+|-------|---------|-------|
+| `petgraph` 0.8 | Graph data structure | StableGraph, algorithms via trait imports |
+| `egui_graphs` 0.29 | Graph visualization | GraphView widget, events, navigation |
+| `egui` 0.31 | UI framework | Immediate mode, integrated with Servo |
+| `kiddo` 4.2 | KD-tree spatial queries | Physics neighbor lookup |
+| `fjall` 3 | Append-only log | Persistence mutations |
+| `redb` 2 | KV store | Persistence snapshots |
+| `rkyv` 0.8 | Serialization | Zero-copy, used by both fjall and redb |
+| `crossbeam` | Worker channels | Physics thread communication |
+| `euclid` | 2D geometry | Point2D, Vector2D throughout |
 
 ---
 
 ## References
 
 **Codebase**:
-- `ports/graphshell/` — Main implementation (~3,500 LOC)
-- `ports/servoshell/` — Base shell (windowing, event loop, WebRender)
-- `components/constellation/` — Servo's coordinator (upstream)
-
-**Key Crates**:
-- `slotmap` — Graph storage
-- `euclid` — 2D geometry
-- `egui` — Immediate-mode UI
-- `crossbeam` — Physics worker channels
-- `servo` — Browser engine (libservo)
+- `ports/graphshell/` — Main implementation (~4,500 LOC in core modules)
+- `ports/servoshell/` — Base shell (windowing, event loop, WebRender) — graphshell extends this
+- `components/servo/` — libservo (browser engine)
 
 **Checkpoint Analyses**:
+- `archive_docs/checkpoint_2026-02-10/2026-02-10_crate_refactor_plan.md` — egui_graphs + petgraph + kiddo integration history
 - `archive_docs/checkpoint_2026-02-09/Claude ANALYSIS 2.9.26.md` — Codebase audit & recommendations
-- `archive_docs/checkpoint_2026-02-09/Gemini Graphshell Analysis 2.9.26.md` — Engine visualization concept
-- `archive_docs/checkpoint_2026-02-09/GRAPHSHELL_CHANGELOG.md` — Commit history

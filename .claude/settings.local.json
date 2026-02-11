@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(powershell -Command:*)",
+      "Bash(cargo tree:*)",
+      "Bash(findstr:*)",
+      "Bash(dir /s /b \"c:\\\\Users\\\\mark_\\\\.cargo\\\\registry\\\\src\\\\*egui_graphs*\")",
+      "Bash(cargo search:*)",
+      "Bash(dir:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo info:*)",
+      "Bash(grep:*)",
+      "Bash(wc:*)"
+    ]
+  }
+}

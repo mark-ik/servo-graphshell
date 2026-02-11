@@ -76,13 +76,13 @@ mime_guess = { workspace = true }
 raw-window-handle = { workspace = true }
 rustls = { workspace = true, features = ["aws-lc-rs"] }
 serde = { workspace = true, features = ["derive"] }
-slotmap = "1.0"
 tokio = { workspace = true }
 toml = "0.8"
 tracing = { workspace = true, optional = true }
 tracing-perfetto = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["env-filter"] }
 url = { workspace = true }
+rand = "0.8"
 webdriver_server = { path = "../../components/webdriver_server" }
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -123,6 +123,9 @@ egui_glow = { version = "0.33.3", features = ["winit"] }
 egui_graphs = { version = "0.29.0", features = ["events"] }
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 kiddo = "4.2"
+fjall = "3"
+redb = "3"
+rkyv = { version = "0.8", features = ["std"] }
 gilrs = "0.11.1"
 glow = { workspace = true }
 headers = { workspace = true }
@@ -150,3 +153,6 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 objc2-foundation = { version = "0.3.1", default-features = false, features = [
     "std",
 ] }
+
+[dev-dependencies]
+tempfile = "3"

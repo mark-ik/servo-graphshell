@@ -139,7 +139,7 @@ fn run_physics_worker(
                 // Collect updated positions
                 let positions: HashMap<NodeKey, Point2D<f32>> = g
                     .nodes()
-                    .map(|node| (node.id, node.position))
+                    .map(|(key, node)| (key, node.position))
                     .collect();
 
                 // Send positions back to main thread

@@ -205,26 +205,157 @@
 - ✅ Read DOC_POLICY
 - ✅ Identified crate candidates aligned with analysis
 - ✅ Created this plan file per workflow documentation rule
+- ✅ Added petgraph v0.8.3 to Cargo.toml with serde-1 feature
+- ✅ Added egui_graphs v0.29.0 to Cargo.toml (for future use)
+- ✅ Created `graph/petgraph_adapter.rs` with bidirectional Graph ↔ petgraph conversion
+- ✅ Added graph algorithm methods to Graph:
+  - `shortest_path(from, to)` - Dijkstra pathfinding
+  - `connected_components()` - Find disconnected subgraphs
+  - `is_reachable(from, to)` - Check path existence
+- ✅ All code compiles successfully (cargo check passed)
+- ⏳ Running tests to verify no breakage
+
+**Approach Decision:**
+Started with Phase 2 (petgraph) instead of Phase 1 (egui_graphs) because:
+1. egui_graphs v0.29.0 API incompatibility issues  (imports don't match)
+2. Claude ANALYSIS recommends petgraph as "projection layer" for algorithms
+3. Custom rendering already works well - no need to rush replacing it
+4. Petgraph gives immediate value: pathfinding, clustering, centrality
 
 **Next Steps:**
-- [ ] User confirmation on which phase to start
-- [ ] Add dependencies to Cargo.toml
-- [ ] Begin Phase 1 implementation
 
-**Questions for User:**
-1. Should we start with Phase 1 (egui_graphs) for biggest impact?
-2. Or Phase 3 (egui_tiles) for split view UX improvement first?
-3. Or focus on Servo integration (Task 1 from earlier) before crate refactors?
+- [x] Verify all tests still pass
+- [x] Add comprehensive tests for algorithm methods
+- [ ] Research egui_graphs v0.29.0 actual API for future integration
+- [ ] Add algorithm usage example in GraphBrowserApp
+- [x] Servo integration (Task 1 from original priority list) - COMPLETED
 
 **Test Results:**
-- Current baseline: 84 tests passing
+
+- Baseline: 84 tests passing
+- After petgraph integration: 89 tests passing (5 new petgraph adapter tests)
+- After adding algorithm tests: 98 tests passing (9 new algorithm tests)
+
+### Session 2: 2026-02-10 (Later)
+
+**Phase 2 Complete - Petgraph Integration Testing:**
+
+- ✅ Added 9 comprehensive tests for graph algorithm methods:
+  - `test_shortest_path_direct` - Direct path between connected nodes
+  - `test_shortest_path_indirect` - Multi-hop path through intermediary nodes
+  - `test_shortest_path_no_path` - No path exists (disconnected nodes)
+  - `test_shortest_path_same_node` - Path from node to itself
+  - `test_connected_components_single` - All nodes in one component
+  - `test_connected_components_multiple` - Multiple disconnected components
+  - `test_connected_components_empty` - Empty graph
+  - `test_is_reachable_direct` - Direct reachability
+  - `test_is_reachable_indirect` - Indirect reachability through intermediary
+  - `test_is_reachable_no_path` - No path exists
+
+- ✅ Fixed `connected_components()` implementation:
+  - Initially used Kosaraju's SCC (strongly connected components - requires bidirectional paths)
+  - Changed to BFS-based approach treating edges as bidirectional
+  - Now correctly finds weakly connected components
+  - Simpler implementation using standard library collections
+
+- ✅ All 98 tests pass (0 failures)
+
+**Algorithm Method Validation:**
+
+All three petgraph-based algorithms now have comprehensive test coverage:
+
+- `shortest_path(from, to)` - Uses Dijkstra + BFS path reconstruction
+- `connected_components()` - Uses BFS treating graph as undirected
+- `is_reachable(from, to)` - Wrapper around shortest_path
+
+---
+
+### Session 3: 2026-02-10 (User Testing & Bug Fixes)
+
+**User Testing:**
+
+After implementing Servo integration and petgraph algorithms, user compiled and tested graphshell with real browsing. Discovered multiple critical bugs that required immediate fixes before proceeding with crate refactoring.
+
+**Critical Bugs Found & Fixed:**
+
+See [2026-02-10_servo_integration_plan.md](2026-02-10_servo_integration_plan.md#session-3-2026-02-10-bug-fixes-after-user-testing) for detailed bug reports and fixes:
+
+1. ✅ **Tab restoration broken** - Fixed condition in gui.rs:741
+2. ✅ **Camera zoom too aggressive** - Reduced max zoom from 10.0 to 2.0 for overlapping nodes
+3. ℹ️ **Nodes stacking** - Expected behavior, physics needs time to spread nodes
+
+**Impact on Crate Refactoring:**
+
+- **Phase 1 (egui_graphs)**: Still recommended, but custom rendering works well enough
+- **Phase 2 (petgraph)**: ✅ Complete and tested, ready for production use
+- **Phase 3 (egui_tiles)**: Higher priority after discovering tab management issues
+- **Phase 4 (kiddo)**: Lower priority, custom spatial hash works well
+
+**Next Steps:**
+
+- Continue with Phase 3 (egui_tiles) to improve split view UX
+
+---
+
+### Session 4: 2026-02-10 (egui_graphs + kiddo Integration)
+
+**Phase 1 Complete - egui_graphs Integration:**
+
+- ✅ Created `graph/egui_adapter.rs` with `EguiGraphState` for SlotMap → egui_graphs conversion
+- ✅ Refactored `render/mod.rs` to use `GraphView` widget (371 → ~297 LOC)
+  - Replaced custom painter calls with egui_graphs rendering
+  - Built-in zoom/pan navigation (SettingsNavigation)
+  - Built-in node dragging and selection (SettingsInteraction)
+  - Always-visible labels (SettingsStyle)
+  - Event-driven interaction (NodeDoubleClick → focus, NodeDragStart/End → physics pause)
+  - Added repulsion_radius slider to physics panel
+- ✅ Refactored `input/mod.rs` (313 → 58 LOC, -81% reduction)
+  - Removed all custom mouse handling (drag, pan, zoom, selection, hit testing)
+  - Kept keyboard shortcuts (T, P, C, Home, Escape)
+  - 'C' now triggers egui_graphs fit_to_screen instead of custom camera
+- ✅ Updated `app.rs`:
+  - Removed Camera field and all camera methods (update_camera, center_camera)
+  - Added `fit_to_screen_requested: bool` field (one-shot flag for 'C' key)
+  - Added `request_fit_to_screen()` method
+- ✅ Updated `gui.rs`: Removed `update_camera(dt)` call
+- ✅ All 82 tests pass (was 100; removed 27 dead camera/render/input tests, added 9 new)
+
+**Phase 4 Complete - kiddo KD-tree Integration:**
+
+- ✅ Added `kiddo = "4.2"` to Cargo.toml
+- ✅ Replaced `SpatialGrid` HashMap with `kiddo::KdTree<f64, 2>` (95 LOC, same interface)
+  - `within_unsorted::<SquaredEuclidean>` for O(log n) radius queries
+  - Parallel `node_keys: Vec<NodeKey>` array for index → key lookup
+- ✅ Added `repulsion_radius: f32` to `PhysicsConfig` (default: 300.0)
+  - Configurable via physics panel slider (50-1000 range)
+  - Replaces hardcoded `300.0` distance check in physics step
+- ✅ Updated physics to use `query_nearby_radius(pos, config.repulsion_radius)`
+- ✅ Added 4 new spatial grid tests (insertion, clear, radius query, legacy API)
+
+**Architecture Decisions:**
+
+- **Per-frame conversion approach**: Rebuild egui_graphs::Graph from SlotMap each frame
+  - Pros: Simple, no sync complexity, positions always match physics
+  - Cons: Negligible conversion cost for < 1000 nodes
+  - GraphView stores zoom/pan state in egui memory (persists across rebuilds)
+  - Interaction state (drag, select) set fresh by GraphView each frame
+- **Event sink**: `Rc<RefCell<Vec<Event>>>` (wasm-friendly, no crossbeam dependency)
+- **Layout**: Using `LayoutRandom` (no-op) since our physics engine controls positions
+- **User preference**: Favor maintained crates over custom implementations
+
+**LOC Impact:**
+- render/mod.rs: 371 → 297 (-20%)
+- input/mod.rs: 313 → 58 (-81%)
+- New: egui_adapter.rs: ~100 LOC
+- Net reduction: ~330 LOC of custom code replaced by crate
 
 ---
 
 ## Notes
 
-- Custom physics engine is actually quite good (spatial hash grid optimization)
-- No need to replace physics immediately - can keep it while using egui_graphs for rendering
-- Camera smooth interpolation code is simple and works - no crate needed
-- `egui_graphs` was not mentioned in Claude ANALYSIS but is a major opportunity
+- Custom physics engine works well with egui_graphs rendering
+- kiddo KD-tree is a drop-in replacement for HashMap spatial hash
+- Camera module still exists but is dead code (can be removed in cleanup)
+- egui_graphs built-in navigation handles zoom/pan better than custom camera
 - Phase order can be flexible - independence between phases allows parallel work
+- **Principle**: Favor maintained, well-documented crates over custom implementations

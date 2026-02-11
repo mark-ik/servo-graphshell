@@ -14,7 +14,7 @@ use egui::{CentralPanel, Color32, Vec2, Window};
 use egui_graphs::events::Event;
 use egui_graphs::{
     DefaultEdgeShape, DefaultNodeShape, GraphView, LayoutRandom, LayoutStateRandom,
-    SettingsInteraction, SettingsNavigation, SettingsStyle,
+    MetadataFrame, SettingsInteraction, SettingsNavigation, SettingsStyle,
 };
 use euclid::default::Point2D;
 use petgraph::stable_graph::NodeIndex;
@@ -23,8 +23,11 @@ use std::rc::Rc;
 
 /// Render the graph view using egui_graphs
 pub fn render_graph(ctx: &egui::Context, app: &mut GraphBrowserApp) {
-    // Build egui_graphs representation from our graph
-    let mut state = EguiGraphState::from_graph(&app.graph);
+    // Build or reuse egui_graphs state (only rebuild when graph structure changes)
+    if app.egui_state.is_none() || app.egui_state_dirty {
+        app.egui_state = Some(EguiGraphState::from_graph(&app.graph));
+        app.egui_state_dirty = false;
+    }
 
     // Event collection buffer
     let events: Rc<RefCell<Vec<Event>>> = Rc::new(RefCell::new(Vec::new()));
@@ -45,51 +48,89 @@ pub fn render_graph(ctx: &egui::Context, app: &mut GraphBrowserApp) {
     let style = SettingsStyle::new()
         .with_labels_always(true);
 
-    // Render the graph
-    CentralPanel::default()
-        .frame(egui::Frame::new().fill(Color32::from_rgb(20, 20, 25)))
-        .show(ctx, |ui| {
-            ui.add(
-                &mut GraphView::<
-                    _,
-                    _,
-                    _,
-                    _,
-                    DefaultNodeShape,
-                    DefaultEdgeShape,
-                    LayoutStateRandom,
-                    LayoutRandom,
-                >::new(&mut state.graph)
-                .with_navigations(&nav)
-                .with_interactions(&interaction)
-                .with_styles(&style)
-                .with_event_sink(&events),
-            );
+    // Capture overlay position before CentralPanel consumes remaining space
+    let overlay_top_y = ctx.available_rect().min.y;
 
-            // Draw info overlay on top
+    // Render the graph (nested scope for mutable borrow)
+    {
+        let state = app.egui_state.as_mut().expect("egui_state should be initialized");
+
+        CentralPanel::default()
+            .frame(egui::Frame::new().fill(Color32::from_rgb(20, 20, 25)))
+            .show(ctx, |ui| {
+                ui.add(
+                    &mut GraphView::<
+                        _,
+                        _,
+                        _,
+                        _,
+                        DefaultNodeShape,
+                        DefaultEdgeShape,
+                        LayoutStateRandom,
+                        LayoutRandom,
+                    >::new(&mut state.graph)
+                    .with_navigations(&nav)
+                    .with_interactions(&interaction)
+                    .with_styles(&style)
+                    .with_event_sink(&events),
+                );
+            });
+    } // Drop mutable borrow of app.egui_state here
+
+    // Draw info overlay using Area (not CentralPanel, which would steal mouse events)
+    egui::Area::new(egui::Id::new("graph_info_overlay"))
+        .fixed_pos(egui::pos2(0.0, overlay_top_y))
+        .interactable(false)
+        .show(ctx, |ui| {
             draw_graph_info(ui, app);
         });
 
     // Reset fit_to_screen flag (one-shot behavior for 'C' key)
     app.fit_to_screen_requested = false;
 
+    // Post-frame zoom clamp: enforce min/max bounds on egui_graphs zoom
+    clamp_zoom(ctx, app);
+
     // Process interaction events
-    process_events(app, &state, &events);
+    process_events(app, &events);
+}
+
+/// Clamp the egui_graphs zoom to the camera's min/max bounds.
+/// Reads MetadataFrame from egui's persisted data, clamps zoom, writes back if changed.
+fn clamp_zoom(ctx: &egui::Context, app: &mut GraphBrowserApp) {
+    let meta_id = egui::Id::new("egui_graphs_metadata_");
+    ctx.data_mut(|data| {
+        if let Some(mut meta) = data.get_persisted::<MetadataFrame>(meta_id) {
+            let clamped = app.camera.clamp(meta.zoom);
+            app.camera.current_zoom = clamped;
+            if (meta.zoom - clamped).abs() > f32::EPSILON {
+                meta.zoom = clamped;
+                data.insert_persisted(meta_id, meta);
+            }
+        }
+    });
 }
 
 /// Process egui_graphs events and sync state back to our graph
 fn process_events(
     app: &mut GraphBrowserApp,
-    state: &EguiGraphState,
     events: &Rc<RefCell<Vec<Event>>>,
 ) {
+    // Process events that only need to lookup keys first (collect keys)
+    let mut keys_to_focus = Vec::new();
+    let mut drag_end_idx = None;
+    let mut move_updates = Vec::new();
+    let mut keys_to_select = Vec::new();
+    
     for event in events.borrow_mut().drain(..) {
         match event {
             Event::NodeDoubleClick(p) => {
-                // Double-click: switch to detail view for this node
-                let idx = NodeIndex::new(p.id);
-                if let Some(key) = state.get_key(idx) {
-                    app.focus_node(key);
+                // Lookup key from state (immutable borrow)
+                if let Some(state) = app.egui_state.as_ref() {
+                    let idx = NodeIndex::new(p.id);
+                    if let Some(key) = state.get_key(idx) {
+                        keys_to_focus.push(key);
+                    }
                 }
             },
             Event::NodeDragStart(_) => {
@@ -97,40 +138,73 @@ fn process_events(
             },
             Event::NodeDragEnd(p) => {
                 app.set_interacting(false);
-                // Sync final drag position back to our graph
-                sync_node_position(app, state, NodeIndex::new(p.id));
+                drag_end_idx = Some(NodeIndex::new(p.id));
             },
             Event::NodeMove(p) => {
-                // Live position update during drag
                 let idx = NodeIndex::new(p.id);
-                if let Some(key) = state.get_key(idx) {
-                    if let Some(node) = app.graph.get_node_mut(key) {
-                        node.position = Point2D::new(p.new_pos[0], p.new_pos[1]);
+                // Lookup key first
+                if let Some(state) = app.egui_state.as_ref() {
+                    if let Some(key) = state.get_key(idx) {
+                        move_updates.push((key, Point2D::new(p.new_pos[0], p.new_pos[1])));
                     }
                 }
             },
             Event::NodeSelect(p) => {
-                let idx = NodeIndex::new(p.id);
-                if let Some(key) = state.get_key(idx) {
-                    app.select_node(key, false);
+                // Lookup key from state (immutable borrow)
+                if let Some(state) = app.egui_state.as_ref() {
+                    let idx = NodeIndex::new(p.id);
+                    if let Some(key) = state.get_key(idx) {
+                        keys_to_select.push(key);
+                    }
                 }
             },
             Event::NodeDeselect(_p) => {
                 // Clear selection state (handled by next select event)
             },
+            Event::Zoom(p) => {
+                app.camera.current_zoom = app.camera.clamp(p.new_zoom);
+            },
             _ => {}
         }
+    }
+    
+    // Now apply all the mutations (no more borrows of egui_state)
+    for key in keys_to_focus {
+        app.focus_node(key);
+    }
+    
+    if let Some(idx) = drag_end_idx {
+        sync_node_position(app, idx);
+    }
+    
+    for (key, position) in move_updates {
+        if let Some(node) = app.graph.get_node_mut(key) {
+            node.position = position;
+        }
+    }
+    
+    for key in keys_to_select {
+        app.select_node(key, false);
     }
 }
 
 /// Sync a node's position from egui_graphs back to our graph
-fn sync_node_position(app: &mut GraphBrowserApp, state: &EguiGraphState, idx: NodeIndex) {
-    if let Some(key) = state.get_key(idx) {
-        if let Some(egui_node) = state.graph.node(idx) {
-            let pos = egui_node.location();
-            if let Some(node) = app.graph.get_node_mut(key) {
-                node.position = Point2D::new(pos.x, pos.y);
-            }
+fn sync_node_position(app: &mut GraphBrowserApp, idx: NodeIndex) {
+    // First, read the position from egui_state
+    let position_opt = if let Some(state) = app.egui_state.as_ref() {
+        if let Some(key) = state.get_key(idx) {
+            state.graph.node(idx).map(|egui_node| (key, egui_node.location()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    
+    // Then update the graph
+    if let Some((key, pos)) = position_opt {
+        if let Some(node) = app.graph.get_node_mut(key) {
+            node.position = Point2D::new(pos.x, pos.y);
         }
     }
 }
@@ -138,7 +212,7 @@ fn sync_node_position(app: &mut GraphBrowserApp, state: &EguiGraphState, idx: No
 /// Draw graph information overlay
 fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
     let info_text = format!(
-        "Nodes: {} | Edges: {} | Physics: {} | View: {}",
+        "Nodes: {} | Edges: {} | Physics: {} | Zoom: {:.1}x | View: {}",
         app.graph.node_count(),
         app.graph.edge_count(),
         if app.physics.is_running {
@@ -146,6 +220,7 @@ fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
         } else {
             "Paused"
         },
+        app.camera.current_zoom,
         match app.view {
             View::Graph => "Graph",
             View::Detail(_) => "Detail",
@@ -162,7 +237,7 @@ fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
 
     // Draw controls hint
     let controls_text =
-        "Double-click: Focus Node | T: Toggle Physics | P: Physics Settings | C: Fit to Screen | Home: Toggle View";
+        "Double-click: Focus | N: New Node | Del: Remove | Ctrl+Shift+Del: Clear | T: Physics | P: Settings | C: Fit | Home/Esc: Toggle View";
     ui.painter().text(
         ui.available_rect_before_wrap().left_bottom() + Vec2::new(10.0, -10.0),
         egui::Align2::LEFT_BOTTOM,

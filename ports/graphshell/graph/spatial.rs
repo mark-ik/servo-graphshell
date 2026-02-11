@@ -60,11 +60,12 @@ impl SpatialGrid {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use petgraph::stable_graph::NodeIndex;
 
     #[test]
     fn test_spatial_grid_insertion() {
         let mut grid = SpatialGrid::new(100.0);
-        let key = NodeKey::default();
+        let key = NodeIndex::new(0);
 
         grid.insert(key, Point2D::new(50.0, 50.0));
 
@@ -76,7 +77,7 @@ mod tests {
     #[test]
     fn test_spatial_grid_clear() {
         let mut grid = SpatialGrid::new(100.0);
-        let key = NodeKey::default();
+        let key = NodeIndex::new(0);
 
         grid.insert(key, Point2D::new(0.0, 0.0));
         grid.clear();
@@ -88,8 +89,8 @@ mod tests {
     #[test]
     fn test_spatial_grid_radius_query() {
         let mut grid = SpatialGrid::new(100.0);
-        let key1 = NodeKey::default();
-        let key2 = NodeKey::default();
+        let key1 = NodeIndex::new(0);
+        let key2 = NodeIndex::new(1);
 
         grid.insert(key1, Point2D::new(0.0, 0.0));
         grid.insert(key2, Point2D::new(100.0, 100.0));
@@ -105,5 +106,4 @@ mod tests {
         assert!(nearby.contains(&key1));
         assert!(nearby.contains(&key2));
     }
-
 }

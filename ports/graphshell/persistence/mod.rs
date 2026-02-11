@@ -1,0 +1,429 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+//! Graph persistence using fjall (append-only log) + redb (snapshots) + rkyv (serialization).
+//!
+//! Architecture:
+//! - Every graph mutation is journaled to fjall as a rkyv-serialized LogEntry
+//! - Periodic snapshots write the full graph to redb via rkyv
+//! - On startup: load latest snapshot, replay log entries after it
+
+pub mod types;
+
+use crate::graph::Graph;
+use log::warn;
+use redb::ReadableDatabase;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+use types::{GraphSnapshot, LogEntry};
+
+const SNAPSHOT_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("snapshots");
+
+/// Persistent graph store backed by fjall (log) + redb (snapshots)
+pub struct GraphStore {
+    #[allow(dead_code)]
+    db: fjall::Database,
+    log_keyspace: fjall::Keyspace,
+    snapshot_db: redb::Database,
+    log_sequence: u64,
+    last_snapshot: Instant,
+    snapshot_interval: Duration,
+}
+
+impl GraphStore {
+    /// Open or create a graph store at the given directory
+    pub fn open(base_dir: PathBuf) -> Result<Self, GraphStoreError> {
+        std::fs::create_dir_all(&base_dir)
+            .map_err(|e| GraphStoreError::Io(format!("Failed to create dir: {e}")))?;
+
+        let log_path = base_dir.join("log");
+        let snapshot_path = base_dir.join("snapshots.redb");
+
+        let db = fjall::Database::builder(&log_path)
+            .open()
+            .map_err(|e| GraphStoreError::Fjall(format!("{e}")))?;
+
+        let log_keyspace = db
+            .keyspace("mutations", || fjall::KeyspaceCreateOptions::default())
+            .map_err(|e| GraphStoreError::Fjall(format!("{e}")))?;
+
+        let snapshot_db = redb::Database::create(&snapshot_path)
+            .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+
+        // Find the next log sequence number
+        let log_sequence = Self::find_max_sequence(&log_keyspace) + 1;
+
+        Ok(Self {
+            db,
+            log_keyspace,
+            snapshot_db,
+            log_sequence,
+            last_snapshot: Instant::now(),
+            snapshot_interval: Duration::from_secs(300), // 5 minutes
+        })
+    }
+
+    /// Append a mutation to the log
+    pub fn log_mutation(&mut self, entry: &LogEntry) {
+        let bytes = match rkyv::to_bytes::<rkyv::rancor::Error>(entry) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Failed to serialize log entry: {e}");
+                return;
+            },
+        };
+
+        let key = self.log_sequence.to_be_bytes();
+        if let Err(e) = self.log_keyspace.insert(key, bytes.as_ref()) {
+            warn!("Failed to write log entry: {e}");
+        }
+        self.log_sequence += 1;
+    }
+
+    /// Take a full snapshot of the graph and compact the log
+    pub fn take_snapshot(&mut self, graph: &Graph) {
+        let snapshot = graph.to_snapshot();
+        let bytes = match rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Failed to serialize snapshot: {e}");
+                return;
+            },
+        };
+
+        // Write snapshot to redb
+        let write_result = (|| -> Result<(), GraphStoreError> {
+            let write_txn = self
+                .snapshot_db
+                .begin_write()
+                .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+            {
+                let mut table = write_txn
+                    .open_table(SNAPSHOT_TABLE)
+                    .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+                table
+                    .insert("latest", bytes.as_ref())
+                    .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+            }
+            write_txn
+                .commit()
+                .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_result {
+            warn!("Failed to write snapshot: {e}");
+            return;
+        }
+
+        // Clear the log since we have a fresh snapshot
+        self.clear_log();
+        self.last_snapshot = Instant::now();
+    }
+
+    /// Recover graph state from snapshot + log replay
+    pub fn recover(&self) -> Option<Graph> {
+        let snapshot = self.load_snapshot();
+
+        let mut graph = if let Some(snap) = &snapshot {
+            Graph::from_snapshot(snap)
+        } else {
+            Graph::new()
+        };
+
+        self.replay_log(&mut graph);
+
+        if graph.node_count() > 0 {
+            Some(graph)
+        } else {
+            None
+        }
+    }
+
+    /// Check if it's time for a periodic snapshot
+    pub fn check_periodic_snapshot(&mut self, graph: &Graph) {
+        if self.last_snapshot.elapsed() >= self.snapshot_interval {
+            self.take_snapshot(graph);
+        }
+    }
+
+    fn load_snapshot(&self) -> Option<GraphSnapshot> {
+        let read_txn = self.snapshot_db.begin_read().ok()?;
+        let table = read_txn.open_table(SNAPSHOT_TABLE).ok()?;
+        let entry = table.get("latest").ok()??;
+        let bytes = entry.value();
+
+        // Copy to aligned buffer — redb bytes may not satisfy rkyv alignment
+        let mut aligned = rkyv::util::AlignedVec::<16>::new();
+        aligned.extend_from_slice(bytes);
+
+        rkyv::from_bytes::<GraphSnapshot, rkyv::rancor::Error>(&aligned).ok()
+    }
+
+    fn replay_log(&self, graph: &mut Graph) {
+        use types::ArchivedLogEntry;
+
+        for guard in self.log_keyspace.iter() {
+            let (_, value) = match guard.into_inner() {
+                Ok(kv) => kv,
+                Err(_) => continue,
+            };
+
+            let archived =
+                match rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(value.as_ref()) {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+
+            match archived {
+                ArchivedLogEntry::AddNode {
+                    url,
+                    position_x,
+                    position_y,
+                } => {
+                    if graph.get_node_by_url(url.as_str()).is_none() {
+                        let px: f32 = (*position_x).into();
+                        let py: f32 = (*position_y).into();
+                        graph.add_node(
+                            url.to_string(),
+                            euclid::default::Point2D::new(px, py),
+                        );
+                    }
+                },
+                ArchivedLogEntry::AddEdge {
+                    from_url,
+                    to_url,
+                    edge_type,
+                } => {
+                    let from = graph.get_node_by_url(from_url.as_str()).map(|(key, _)| key);
+                    let to = graph.get_node_by_url(to_url.as_str()).map(|(key, _)| key);
+                    if let (Some(from_key), Some(to_key)) = (from, to) {
+                        let et = match edge_type {
+                            types::ArchivedPersistedEdgeType::Hyperlink => {
+                                crate::graph::EdgeType::Hyperlink
+                            },
+                            types::ArchivedPersistedEdgeType::History => {
+                                crate::graph::EdgeType::History
+                            },
+                        };
+                        graph.add_edge(from_key, to_key, et);
+                    }
+                },
+                ArchivedLogEntry::UpdateNodeTitle { url, title } => {
+                    if let Some((key, _)) = graph.get_node_by_url(url.as_str()) {
+                        if let Some(node_mut) = graph.get_node_mut(key) {
+                            node_mut.title = title.to_string();
+                        }
+                    }
+                },
+                ArchivedLogEntry::PinNode { url, is_pinned } => {
+                    if let Some((key, _)) = graph.get_node_by_url(url.as_str()) {
+                        if let Some(node_mut) = graph.get_node_mut(key) {
+                            node_mut.is_pinned = *is_pinned;
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    fn clear_log(&mut self) {
+        let keys: Vec<Vec<u8>> = self
+            .log_keyspace
+            .iter()
+            .filter_map(|guard| guard.key().ok().map(|k| k.to_vec()))
+            .collect();
+        for key in keys {
+            let _ = self.log_keyspace.remove(key);
+        }
+        self.log_sequence = 0;
+    }
+
+    fn find_max_sequence(keyspace: &fjall::Keyspace) -> u64 {
+        let mut max = 0u64;
+        for guard in keyspace.iter() {
+            if let Ok(key_bytes) = guard.key() {
+                if key_bytes.len() == 8 {
+                    let seq =
+                        u64::from_be_bytes(key_bytes.as_ref().try_into().unwrap_or([0u8; 8]));
+                    max = max.max(seq);
+                }
+            }
+        }
+        max
+    }
+
+    /// Get the default storage directory for graph data
+    pub fn default_data_dir() -> PathBuf {
+        let mut dir = dirs::config_dir().expect("No config directory available");
+        dir.push("graphshell");
+        dir.push("graphs");
+        dir
+    }
+}
+
+/// Errors from the graph store
+#[derive(Debug)]
+pub enum GraphStoreError {
+    Io(String),
+    Fjall(String),
+    Redb(String),
+}
+
+impl std::fmt::Display for GraphStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GraphStoreError::Io(e) => write!(f, "IO error: {e}"),
+            GraphStoreError::Fjall(e) => write!(f, "Fjall error: {e}"),
+            GraphStoreError::Redb(e) => write!(f, "Redb error: {e}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::EdgeType;
+    use euclid::default::Point2D;
+    use tempfile::TempDir;
+
+    fn create_test_store() -> (GraphStore, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let store = GraphStore::open(dir.path().to_path_buf()).unwrap();
+        (store, dir)
+    }
+
+    #[test]
+    fn test_empty_startup() {
+        let (store, _dir) = create_test_store();
+        let recovered = store.recover();
+        assert!(recovered.is_none());
+    }
+
+    #[test]
+    fn test_log_and_recover() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        {
+            let mut store = GraphStore::open(path.clone()).unwrap();
+            store.log_mutation(&LogEntry::AddNode {
+                url: "https://a.com".to_string(),
+                position_x: 10.0,
+                position_y: 20.0,
+            });
+            store.log_mutation(&LogEntry::AddNode {
+                url: "https://b.com".to_string(),
+                position_x: 30.0,
+                position_y: 40.0,
+            });
+            store.log_mutation(&LogEntry::AddEdge {
+                from_url: "https://a.com".to_string(),
+                to_url: "https://b.com".to_string(),
+                edge_type: types::PersistedEdgeType::Hyperlink,
+            });
+        }
+
+        {
+            let store = GraphStore::open(path).unwrap();
+            let graph = store.recover().unwrap();
+            assert_eq!(graph.node_count(), 2);
+            assert_eq!(graph.edge_count(), 1);
+
+            let (_, a) = graph.get_node_by_url("https://a.com").unwrap();
+            assert_eq!(a.position.x, 10.0);
+            assert_eq!(a.position.y, 20.0);
+        }
+    }
+
+    #[test]
+    fn test_snapshot_and_recover() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        {
+            let mut store = GraphStore::open(path.clone()).unwrap();
+            let mut graph = Graph::new();
+            graph.add_node("https://a.com".to_string(), Point2D::new(100.0, 200.0));
+            graph.add_node("https://b.com".to_string(), Point2D::new(300.0, 400.0));
+            let (n1, _) = graph.get_node_by_url("https://a.com").unwrap();
+            let (n2, _) = graph.get_node_by_url("https://b.com").unwrap();
+            graph.add_edge(n1, n2, EdgeType::Hyperlink);
+
+            store.take_snapshot(&graph);
+        }
+
+        {
+            let store = GraphStore::open(path).unwrap();
+            let graph = store.recover().unwrap();
+            assert_eq!(graph.node_count(), 2);
+            assert_eq!(graph.edge_count(), 1);
+        }
+    }
+
+    #[test]
+    fn test_snapshot_plus_log_recovery() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        {
+            let mut store = GraphStore::open(path.clone()).unwrap();
+            let mut graph = Graph::new();
+            graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
+            store.take_snapshot(&graph);
+
+            store.log_mutation(&LogEntry::AddNode {
+                url: "https://b.com".to_string(),
+                position_x: 50.0,
+                position_y: 50.0,
+            });
+        }
+
+        {
+            let store = GraphStore::open(path).unwrap();
+            let graph = store.recover().unwrap();
+            assert_eq!(graph.node_count(), 2);
+            assert!(graph.get_node_by_url("https://a.com").is_some());
+            assert!(graph.get_node_by_url("https://b.com").is_some());
+        }
+    }
+
+    #[test]
+    fn test_duplicate_url_idempotent() {
+        let (mut store, _dir) = create_test_store();
+
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://a.com".to_string(),
+            position_x: 0.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://a.com".to_string(),
+            position_x: 100.0,
+            position_y: 100.0,
+        });
+
+        let graph = store.recover().unwrap();
+        assert_eq!(graph.node_count(), 1);
+    }
+
+    #[test]
+    fn test_log_title_update() {
+        let (mut store, _dir) = create_test_store();
+
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://a.com".to_string(),
+            position_x: 0.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::UpdateNodeTitle {
+            url: "https://a.com".to_string(),
+            title: "My Site".to_string(),
+        });
+
+        let graph = store.recover().unwrap();
+        let (_, node) = graph.get_node_by_url("https://a.com").unwrap();
+        assert_eq!(node.title, "My Site");
+    }
+}

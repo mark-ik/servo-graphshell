@@ -92,14 +92,14 @@ impl PhysicsEngine {
         
         // Rebuild spatial grid
         self.spatial_grid.clear();
-        for node in graph.nodes() {
+        for (key, node) in graph.nodes() {
             if !node.is_pinned {
-                self.spatial_grid.insert(node.id, node.position);
+                self.spatial_grid.insert(key, node.position);
             }
         }
-        
+
         // Calculate forces and update velocities
-        let node_keys: Vec<NodeKey> = graph.nodes().map(|n| n.id).collect();
+        let node_keys: Vec<NodeKey> = graph.nodes().map(|(key, _)| key).collect();
         
         for &key in &node_keys {
             let node = match graph.get_node(key) {
@@ -111,17 +111,18 @@ impl PhysicsEngine {
                 continue;
             }
             
+            let node_pos = node.position;
             let mut force = Vector2D::zero();
 
             // Repulsion from nearby nodes (KD-tree spatial index)
-            let nearby = self.spatial_grid.query_nearby_radius(node.position, self.config.repulsion_radius);
+            let nearby = self.spatial_grid.query_nearby_radius(node_pos, self.config.repulsion_radius);
             for &other_key in &nearby {
                 if other_key == key {
                     continue;
                 }
 
                 if let Some(other_node) = graph.get_node(other_key) {
-                    let delta = node.position - other_node.position;
+                    let delta = node_pos - other_node.position;
                     let distance = delta.length();
 
                     if distance > 0.0 && distance < self.config.repulsion_radius {
@@ -130,29 +131,27 @@ impl PhysicsEngine {
                     }
                 }
             }
-            
+
             // Attraction along edges (Hooke's law)
-            for &edge_key in &node.out_edges {
-                if let Some(edge) = graph.get_edge(edge_key) {
-                    if let Some(target_node) = graph.get_node(edge.to) {
-                        let delta = target_node.position - node.position;
-                        let distance = delta.length();
-                        let displacement = distance - self.config.spring_rest_length;
-                        
-                        force += delta.normalize() * (self.config.spring_strength * displacement);
-                    }
+            let out_neighbors: Vec<NodeKey> = graph.out_neighbors(key).collect();
+            for target_key in out_neighbors {
+                if let Some(target_node) = graph.get_node(target_key) {
+                    let delta = target_node.position - node_pos;
+                    let distance = delta.length();
+                    let displacement = distance - self.config.spring_rest_length;
+
+                    force += delta.normalize() * (self.config.spring_strength * displacement);
                 }
             }
-            
-            for &edge_key in &node.in_edges {
-                if let Some(edge) = graph.get_edge(edge_key) {
-                    if let Some(source_node) = graph.get_node(edge.from) {
-                        let delta = source_node.position - node.position;
-                        let distance = delta.length();
-                        let displacement = distance - self.config.spring_rest_length;
-                        
-                        force += delta.normalize() * (self.config.spring_strength * displacement);
-                    }
+
+            let in_neighbors: Vec<NodeKey> = graph.in_neighbors(key).collect();
+            for source_key in in_neighbors {
+                if let Some(source_node) = graph.get_node(source_key) {
+                    let delta = source_node.position - node_pos;
+                    let distance = delta.length();
+                    let displacement = distance - self.config.spring_rest_length;
+
+                    force += delta.normalize() * (self.config.spring_strength * displacement);
                 }
             }
             

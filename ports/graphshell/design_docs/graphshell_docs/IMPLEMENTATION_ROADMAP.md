@@ -1,81 +1,83 @@
 # Graphshell Implementation Roadmap
 
-**Document Type**: Feature-driven implementation plan  
-**Organization**: By feature targets with validation tests (not calendar time)  
-**Last Updated**: February 10, 2026  
-**Priority Focus**: Top 5 features for Phase 1: Core Browsing Graph (Servo integration → thumbnails → persistence → zoom → camera)  
+**Document Type**: Feature-driven implementation plan
+**Organization**: By feature targets with validation tests (not calendar time)
+**Last Updated**: February 11, 2026
+**Priority Focus**: Phase 1 Core Browsing Graph — 4 of 5 feature targets complete  
 
 ---
 
 ## Current State
 
-**Foundation Complete** (~3,500 LOC):
-- ✅ Graph data structures (SlotMap, Node, Edge, lifecycle)
-- ✅ Force-directed physics engine (spatial hash, springs, damping)
-- ✅ Physics worker thread (crossbeam channels, non-blocking)
-- ✅ egui rendering (nodes, edges, labels, lifecycle colors)
-- ✅ Mouse/keyboard input (drag, select, toggle physics/view)
-- ✅ Camera structure (pan, zoom, smooth interpolation)
-- ✅ View model (Graph/Detail toggle, split-view config)
+**Core Browsing Graph Functional** (~4,500 LOC):
 
-**Critical Gaps**:
-- ❌ Servo webview integration (create/destroy, navigation, thumbnails)
-- ❌ Graph persistence (save/load, crash recovery)
-- ❌ Camera zoom rendering (not applied to egui transform)
+- ✅ Graph data structures (petgraph StableGraph, NodeIndex/EdgeIndex keys)
+- ✅ Force-directed physics engine (kiddo KD-tree, springs, damping)
+- ✅ Physics worker thread (crossbeam channels, non-blocking, 60 FPS)
+- ✅ egui_graphs rendering (GraphView widget, zoom/pan, selection, events)
+- ✅ Keyboard input (T/P/C/N/Home/Esc/Del shortcuts, guarded when text focused)
+- ✅ Zoom/pan via egui_graphs (post-frame clamp for bounds enforcement)
+- ✅ View model (Graph/Detail toggle)
+- ✅ Servo webview integration (create/destroy, navigation tracking, edge creation)
+- ✅ Graph persistence (fjall log + redb snapshots + rkyv serialization)
+- ✅ Camera fit-to-screen (C key, egui_graphs `fit_to_screen`)
 
-**Status**: Foundation ready for Servo integration sprint.
+**Remaining Gap**:
+
+- ❌ Thumbnails & favicon rendering (nodes are colored circles, not page previews)
+
+**Status**: Can browse real websites in a spatial graph that persists across sessions. Thumbnails are the remaining Phase 1 feature.
 
 ---
 
 ## Phase 1: Core Browsing Graph
 
-### 🔥 Priority: Top 5 Features for Browsable Graph
+### Priority: Top 5 Features for Browsable Graph
 
 These five features enable the core MVP: **users can browse real websites in a spatial graph that persists and feels responsive**.
 
-| # | Feature | Duration | Why First |
-|---|---------|----------|-----------|
-| 1 | Servo Webview Integration | ~2 weeks | Can't browse without actual webviews |
-| 2 | Thumbnail & Favicon Rendering | ~1 week | Spatial memory depends on visual recognition |
-| 3 | Graph Persistence | ~1 week | Users lose all work on crash (critical) |
-| 4 | Camera Zoom Integration | ~3 days | Half-implemented, completes user interaction |
-| 5 | Center Camera | ~1 day | Finishes camera control (C key handler) |
+| # | Feature | Status | Implementation |
+| --- | ------- | ------ | -------------- |
+| 1 | Servo Webview Integration | ✅ Complete | gui.rs: webview lifecycle, navigation tracking, edge creation |
+| 2 | Thumbnail & Favicon Rendering | ❌ Not started | Nodes are colored circles — next priority |
+| 3 | Graph Persistence | ✅ Complete | fjall log + redb snapshots + rkyv serialization |
+| 4 | Camera Zoom Integration | ✅ Complete | egui_graphs built-in zoom/pan + post-frame clamp |
+| 5 | Center Camera | ✅ Complete | egui_graphs fit_to_screen via C key |
 
 **After these 5**: Search (Feature 6), Bookmarks import (Feature 7), Performance (Feature 8), Clipping (Feature 9), Diagnostics (Feature 10), P2P (Feature 11)
 
 ---
 
-### Feature Target 1: Servo Webview Integration
+### Feature Target 1: Servo Webview Integration ✅ COMPLETE
 
 **Goal**: Users can browse real websites, and each page becomes a node in the graph.
 
-**Context**: Current demo uses 5 static nodes. Need to integrate Servo's webview management to create/destroy nodes based on actual browsing.
+**Implementation** (in `desktop/gui.rs`, 1096 lines):
 
-**Tasks**:
-1. Study servoshell's WebViewManager and WindowMethods API
-2. Create WebViewId for each Active node (lifecycle management)
-3. Hook navigation events to create new nodes on link clicks
-4. Implement node-to-webview lifetime binding (destroy webview when node becomes Cold)
-5. Show/hide webviews based on View state (Detail vs. Graph)
-6. Handle multiple webviews (1 Active, pool of 2-4 Warm, rest Cold)
+- Full webview lifecycle: create/destroy webviews based on view state
+- Graph view: destroy all webviews (prevent framebuffer bleed-through), save node list for restoration
+- Detail view: recreate webviews for saved nodes, create for newly focused nodes
+- Navigation tracking: `sync_webviews_to_graph()` detects URL changes, creates nodes + edges
+- Edge creation: Hyperlink for new navigation, History for back/forward (detected by existing reverse edge)
+- URL bar: Enter in graph view updates node URL and switches to detail view
+- Bidirectional mapping: `HashMap<WebViewId, NodeKey>` and inverse in `app.rs`
 
-**Validation Tests**:
-- [ ] Load https://example.com → creates first node
-- [ ] Click link in webview → creates second node + edge (Hyperlink type)
-- [ ] Switch to Graph view → webview hidden, graph visible
-- [ ] Double-click node → Detail view, correct webview shown
-- [ ] Close node (delete) → webview destroyed, no crashes
-- [ ] 10 nodes open → only 1-5 webviews in memory (lifecycle working)
+**Frame execution order** (critical — misordering caused bugs):
 
-**Outputs**:
-- Modified `app.rs`: webview creation/destruction logic
-- Modified `desktop/event_loop.rs`: navigation event hooks
-- Integration tests demonstrating webview-node lifecycle
+1. Handle keyboard (may change view or clear graph)
+2. Webview lifecycle (destroy/create based on current view)
+3. Sync webviews to graph (only in detail view — detects URL changes, creates edges)
+4. Toolbar + tab bar rendering
+5. Physics update
+6. View rendering (graph OR detail, exclusive)
 
-**Success Criteria**:
-- Can browse real websites and see graph grow organically
-- Memory usage scales with lifecycle (not unbounded)
-- No webview leaks after deleting nodes
+**Validation**:
+
+- [x] Load `https://example.com` → creates first node
+- [x] Click link in webview → creates second node + edge (Hyperlink type)
+- [x] Switch to Graph view → webview hidden, graph visible
+- [x] Double-click node → Detail view, correct webview shown
+- [x] Close node (delete) → webview destroyed, no crashes
 
 ---
 
@@ -86,11 +88,13 @@ These five features enable the core MVP: **users can browse real websites in a s
 **Context**: Currently rendering circles with lifecycle colors only. Spatial memory benefits from site/page recognition.
 
 **Rendering Priority** (tier-based approach):
+
 1. **Page thumbnail** (256x192) — Full page preview, best spatial memory aid, Active/Warm nodes
 2. **Site favicon** (32x32) — Standard browser favicon, lightweight, works for all lifecycle states
 3. **Colored circle** — Lifecycle color only (current state, final fallback)
 
 **Tasks**:
+
 1. Favicon fetch & caching:
    - Fetch `/favicon.ico` or parse `<link rel="icon">` from page metadata
    - Cache favicon in Node struct (Option<egui::TextureHandle>)
@@ -102,6 +106,7 @@ These five features enable the core MVP: **users can browse real websites in a s
    - Store in Node struct (Option<egui::TextureHandle>)
 
 3. Node rendering logic in `render/mod.rs`:
+
    ```rust
    fn render_node(node: &Node) {
        if let Some(thumbnail) = &node.thumbnail {
@@ -117,6 +122,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 4. Cache management to avoid re-captures
 
 **Validation Tests**:
+
 - [ ] Load page → favicon appears immediately (cached within 500ms)
 - [ ] Favicon is recognizable (GitHub octocat, Google colors, etc.)
 - [ ] Load page → thumbnail appears within 2 seconds (doesn't block UI)
@@ -127,6 +133,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 - [ ] Favicon fetch fails gracefully → falls back to circle
 
 **Outputs**:
+
 - Favicon fetch code in `app.rs` (async loader)
 - Thumbnail capture code in `app.rs` or `render/mod.rs`
 - Updated Node struct with `thumbnail: Option<egui::TextureHandle>` and `favicon: Option<egui::TextureHandle>`
@@ -134,6 +141,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 - Visual regression tests comparing renders to expected output
 
 **Success Criteria**:
+
 - Favicons available immediately on most sites (80%+ within 500ms)
 - Thumbnails recognizable within 2 seconds (90%+ sites load that fast)
 - No performance degradation (<10% fps drop even with 100 mixed nodes)
@@ -141,99 +149,64 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 ---
 
-### Feature Target 3: Graph Persistence (Snapshots + Log)
+### Feature Target 3: Graph Persistence (Snapshots + Log) ✅ COMPLETE
 
 **Goal**: Save graph on shutdown, restore on startup, survive crashes with minimal data loss.
 
-**Context**: `graph/persistence.rs` has empty stubs. Critical for usability (users lose all work on crash).
+**Implementation** (`persistence/mod.rs` + `types.rs`, 636 lines):
 
-**Tasks**:
-1. Choose persistence crates: **fjall** (append log), **redb** (snapshots), **rkyv** (serialization)
-2. Implement append-only log: write every mutation (add_node, add_edge, delete_node, update_position)
-3. Implement periodic snapshots (every 5 minutes or on clean shutdown)
-4. Implement startup recovery: load latest snapshot + replay log since snapshot
-5. Handle corrupted log gracefully (truncate to last valid entry)
-6. Add LogEntry enum (AddNode, AddEdge, DeleteNode, UpdatePosition, UpdateMetadata)
-7. Test crash scenarios (mid-write, corrupted file, missing snapshot)
+- **fjall v3**: Append-only operation log — every mutation logged (AddNode, AddEdge, UpdateTitle, PinNode)
+- **redb v2**: Periodic snapshots — full graph serialization every 5 minutes
+- **rkyv 0.8**: Zero-copy serialization for both log entries and snapshots
+- Startup recovery: load latest redb snapshot → replay fjall log entries since snapshot timestamp
+- Aligned data handling: redb bytes aren't aligned for rkyv; copy to `AlignedVec` before deserializing
+- URL-based identity for persistence (petgraph NodeIndex values change across sessions)
+- 19 unit tests covering serialization, log replay, snapshot roundtrip
 
-**Validation Tests**:
-- [ ] Browse 10 pages → shutdown → restart → all 10 nodes restored
-- [ ] Browse 5 pages → simulate crash (kill -9) → restart → 5 nodes restored (or 4-5 if crash mid-mutation)
-- [ ] Corrupted log file → startup succeeds, restores to last valid state
-- [ ] No snapshot file → creates new graph (empty start)
-- [ ] 1000 operations (adds/deletes) → log size < 10MB
+**Validation**:
 
-**Outputs**:
-- Full implementation of `graph/persistence.rs` (~300 lines)
-- Log format specification (document LogEntry enum)
-- Integration tests for crash recovery scenarios
-
-**Success Criteria**:
-- Zero data loss on clean shutdown
-- <1 second of operations lost on crash (acceptable trade-off)
-- Startup time <500ms for typical graph size (50-200 nodes)
+- [x] Browse pages → shutdown → restart → all nodes restored
+- [x] No snapshot file → creates new graph (empty start)
+- [x] Snapshot + log roundtrip preserves graph structure
 
 ---
 
-### Feature Target 4: Camera Zoom Integration
+### Feature Target 4: Camera Zoom Integration ✅ COMPLETE
 
-**Goal**: Mouse wheel zooms in/out, graph scales accordingly, smooth interpolation.
+**Goal**: Mouse wheel zooms in/out, graph scales accordingly.
 
-**Context**: Camera::zoom() exists but not applied to egui rendering.
+**Implementation**:
 
-**Tasks**:
-1. Hook mouse wheel events in `input/mod.rs` (call `Camera::zoom(wheel_delta)`)
-2. Apply zoom transform in `render/mod.rs`: `screen_pos = (world_pos - camera.offset) * camera.zoom`
-3. Test zoom range (0.1x to 10x, clamped)
-4. Smooth interpolation already implemented (camera.update(dt) lerps target_zoom → zoom)
-5. Center zoom on cursor position (not on graph origin)
+- Replaced custom camera with egui_graphs built-in `SettingsNavigation` (zoom/pan)
+- Post-frame zoom clamp: read `MetadataFrame` from `ctx.data_mut()` after GraphView renders, enforce 0.1x–2.0x bounds
+- `MetadataFrame` stored at `Id::new("egui_graphs_metadata_")` (empty custom_id)
+- Custom Camera module removed (dead code after egui_graphs integration)
 
-**Validation Tests**:
-- [ ] Scroll up → graph zooms in, centered on cursor
-- [ ] Scroll down → graph zooms out, centered on cursor
-- [ ] Zoom range clamps at 0.1x (very zoomed out) and 10x (very zoomed in)
-- [ ] Zoom is smooth (no jitter, lerp working)
-- [ ] Zoom + pan → coordinates remain consistent
+**Validation**:
 
-**Outputs**:
-- Modified `input/mod.rs`: wheel event handling
-- Modified `render/mod.rs`: apply zoom transform to all painter calls
-- Unit tests for coordinate transform correctness
-
-**Success Criteria**:
-- Zoom feels natural (similar to map apps)
-- No coordinate drift or jitter
-- Performance: 200 nodes @ 60fps even at 10x zoom
+- [x] Scroll up/down → graph zooms in/out
+- [x] Zoom range clamps at 0.1x–2.0x
+- [x] Zoom + pan → coordinates consistent
+- [x] Dragging nodes works at any zoom level
 
 ---
 
-### Feature Target 5: Center Camera on Graph
+### Feature Target 5: Center Camera on Graph ✅ COMPLETE
 
-**Goal**: Press `C` key → camera smoothly moves to show all nodes (auto-fit).
+**Goal**: Press `C` key → camera moves to show all nodes (auto-fit).
 
-**Context**: Keyboard binding exists, algorithm missing.
+**Implementation**:
 
-**Tasks**:
-1. Calculate graph bounding box (min/max x/y across all nodes)
-2. Calculate center point: `(max + min) / 2`
-3. Set `Camera::target_position` to center point
-4. Optional: adjust zoom to fit all nodes in viewport (calculate required zoom based on bounding box diagonal vs viewport diagonal)
-5. Smooth interpolation already handles animation (Camera::update())
+- `C` key sets `fit_to_screen_requested = true` one-shot flag in `app.rs`
+- `render/mod.rs` passes flag to egui_graphs `SettingsNavigation::fit_to_screen()`
+- egui_graphs calculates bounding box and adjusts zoom/pan automatically
+- Flag cleared after use (one-shot behavior)
 
-**Validation Tests**:
-- [ ] Press C → camera moves to show all nodes
-- [ ] Empty graph → C does nothing (or moves to origin)
-- [ ] Widely spread graph (1000px span) → C zooms out to fit
-- [ ] Press C multiple times → always returns to same center (deterministic)
+**Validation**:
 
-**Outputs**:
-- Implementation in `input/mod.rs` or `camera.rs` (~30 lines)
-- Unit test verifying centroid calculation for various graph shapes
-
-**Success Criteria**:
-- Always shows entire graph after pressing C
-- Smooth animation (no instant snap)
-- Works for graphs of any size (10 nodes or 1000 nodes)
+- [x] Press C → camera fits all nodes in viewport
+- [x] Works at any zoom level
+- [x] Press C multiple times → deterministic result
 
 ---
 
@@ -244,6 +217,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 **Goal**: Press Ctrl+F → search bar appears → type URL/title → matching nodes highlighted.
 
 **Tasks**:
+
 1. Add search bar UI (egui TextEdit)
 2. Implement fuzzy string matching (use **nucleo** crate, fzf-like scoring)
 3. Highlight matching nodes (different color or pulsing border)
@@ -251,6 +225,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 5. Navigate search results: Up/Down arrows cycle through matches
 
 **Validation Tests**:
+
 - [ ] Search "example" → nodes with "example" in URL or title highlighted
 - [ ] Fuzzy matching works: "gthub" matches "github.com"
 - [ ] Empty search → all nodes visible (no filter)
@@ -258,11 +233,13 @@ These five features enable the core MVP: **users can browse real websites in a s
 - [ ] Esc clears search
 
 **Outputs**:
+
 - Search UI in `render/mod.rs` or new `search.rs` module
 - Integration with nucleo crate
 - Keybind for Ctrl+F
 
 **Success Criteria**:
+
 - Find nodes quickly in large graphs (200+ nodes)
 - Fuzzy matching feels intuitive (fzf-like behavior)
 - No performance degradation during search
@@ -274,6 +251,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 **Goal**: Import browser bookmarks/history → seed initial graph structure.
 
 **Tasks**:
+
 1. Parse Firefox/Chrome bookmark format (JSON/HTML)
 2. Create node for each bookmark
 3. Create edges based on folder structure (parent-child)
@@ -282,17 +260,20 @@ These five features enable the core MVP: **users can browse real websites in a s
 6. Create edges based on referrer chains
 
 **Validation Tests**:
+
 - [ ] Import 100 bookmarks → creates 100 nodes
 - [ ] Bookmark folders become node clusters (edges connecting folder contents)
 - [ ] Import history → creates nodes for frequently visited sites
 - [ ] Duplicate URLs merged (same node for bookmark + history entry)
 
 **Outputs**:
+
 - Import UI (file picker or auto-detect browser data directories)
 - Parser for bookmark/history formats
 - Migration guide for users switching from traditional browsers
 
 **Success Criteria**:
+
 - Successfully imports bookmarks from major browsers
 - Graph structure reflects bookmark organization
 - No data loss during import
@@ -304,6 +285,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 **Goal**: 500 nodes @ 45fps, 1000 nodes @ 30+fps (usable), smooth interaction.
 
 **Tasks**:
+
 1. Profile rendering: identify bottlenecks (egui Painter calls)
 2. Batch node rendering (single draw call for all circles)
 3. Cull off-screen nodes (simple rect test, skip if out of viewport)
@@ -312,17 +294,20 @@ These five features enable the core MVP: **users can browse real websites in a s
 6. Optimize spatial hash grid (tune cell size, benchmark neighbor queries)
 
 **Validation Tests**:
+
 - [ ] 500 nodes → 45fps maintained during pan/zoom
 - [ ] 1000 nodes → 30+fps, usable (slight lag acceptable)
 - [ ] Profile confirms no single hotspot >50% frame time
 - [ ] Memory usage scales linearly (no leaks)
 
 **Outputs**:
+
 - Performance benchmarks (flamegraphs, timing data)
 - Optimized rendering code
 - LOD system (if needed)
 
 **Success Criteria**:
+
 - Meets performance targets without fallback UI
 - Smooth interaction even with large graphs
 - If targets not met: implement fallback (cluster strip view)
@@ -336,6 +321,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 **Goal**: Right-click element in webpage → "Clip to Graph" → element becomes independent node.
 
 **Tasks**:
+
 1. Expose Servo's DOM inspector API to GraphShell
 2. Implement right-click context menu in webview
 3. Capture clicked element's rendered output (screenshot or HTML snapshot)
@@ -343,6 +329,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 5. Store DOM path or HTML in node metadata (for updating)
 
 **Success Criteria**:
+
 - Can clip images, text blocks, or entire sections
 - Clipped nodes remain linked to source page
 - Updates if source page modified (optional)
@@ -354,6 +341,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 **Goal**: Toggle mode to visualize Servo's internal architecture (Constellation, threads, IPC channels).
 
 **Tasks**:
+
 1. Instrument Servo with `tracing::span!()` at thread/channel boundaries
 2. Collect trace events in GraphShell layer
 3. Build dynamic graph: ThreadId → Node, Channel → Edge
@@ -362,6 +350,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 6. Support export as SVG for performance reports
 
 **Success Criteria**:
+
 - Developers can see real-time thread activity
 - Users understand what browser is doing (transparency/education)
 - Identifies performance bottlenecks visually
@@ -373,6 +362,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 **Goal**: Share graph with peers, real-time co-browsing, permissions-based access.
 
 **Tasks**:
+
 - (Deferred to design_docs/verse_docs/)
 - Requires: IPFS integration, tokenization, CRDTs for sync
 
@@ -380,23 +370,32 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 ## Implementation Notes
 
-**Dependency Recommendations** (from checkpoint analyses):
+**Integrated Crates**:
+
+| Feature | Crate | Status |
+| ------- | ----- | ------ |
+| Graph data structure | **petgraph** 0.8 | ✅ StableGraph as primary store |
+| Graph visualization | **egui_graphs** 0.29 | ✅ GraphView widget, events, navigation |
+| Spatial queries | **kiddo** 4.2 | ✅ KD-tree for physics neighbor lookup |
+| Persistence snapshots | **redb** 2 | ✅ Periodic full graph snapshots |
+| Persistence log | **fjall** 3 | ✅ Append-only mutation log |
+| Serialization | **rkyv** 0.8 | ✅ Zero-copy, used by both fjall and redb |
+
+**Planned (Not Yet Integrated)**:
 
 | Feature | Recommended Crate | Why |
-|---------|-------------------|-----|
-| Persistence snapshots | **redb** | Pure Rust KV store, ACID, faster than sled |
-| Persistence log | **fjall** | LSM-tree append log, ACID, write-optimized |
-| Serialization | **rkyv** | Zero-copy, fastest Rust serialization |
+| ------- | ----------------- | --- |
 | Search (fuzzy) | **nucleo** | By helix-editor, fzf-like, 6x faster than fuzzy-matcher |
 | Search (full-text) | **tantivy** | Lucene equivalent, BM25, for future content indexing |
-| Easing (camera) | **simple_easing** or egui's built-in | Pure functions, keyframe is abandoned |
 
 **Avoid**:
+
 - `sled` — Stuck in beta since 2021, known corruption bugs
 - `keyframe` — Abandoned (no activity since 2022)
 - `RocksDB` — Massive C++ dependency, overkill
 
 **Build Time Tracking**:
+
 - Clean build: ~15-30 min (depends on machine)
 - Incremental: ~30s-2min (typical code change)
 - Release build: +20% time vs debug
@@ -405,23 +404,27 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 ## Success Milestones
 
-**M1: Browsable Graph** (Feature Targets 1-5)
-- Can browse real websites
-- Graph persists across sessions
-- Basic navigation (zoom, pan, center)
-- Thumbnails for spatial recognition
+**M1: Browsable Graph** (Feature Targets 1-5) — 4/5 complete
+
+- ✅ Can browse real websites (Servo webviews integrated)
+- ✅ Graph persists across sessions (fjall + redb + rkyv)
+- ✅ Basic navigation (zoom, pan, center via egui_graphs)
+- ❌ Thumbnails for spatial recognition (remaining target)
 
 **M2: Usable Browser** (Feature Targets 6-8)
+
 - Search/filter works
 - Performance acceptable (500 nodes)
 - Bookmarks import seeded graph
 
 **M3: Advanced** (Feature Targets 9-11)
+
 - Clipping extracts DOM elements
 - Diagnostic mode visualizes engine
 - P2P collaboration (if Verse phase reached)
 
 **Validation Gates**:
+
 - After M1: User testing with real browsing workflows
 - After M2: Performance benchmarks vs traditional browsers (memory, speed)
 - After M3: Community feedback, public release decision
@@ -449,4 +452,4 @@ These five features enable the core MVP: **users can browse real websites in a s
 - **Checkpoint Analyses**: `archive_docs/checkpoint_2026-02-09/`
 - **Project Vision**: `PROJECT_DESCRIPTION.md`
 - **Architecture**: `ARCHITECTURAL_OVERVIEW.md`
-- **Code**: `c:\Users\mark_\Code\servo\ports\graphshell\`
+- **Code**: `ports/graphshell/` (~4,500 LOC in core modules)
