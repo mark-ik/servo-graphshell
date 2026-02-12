@@ -13,7 +13,7 @@ use fonts::GlyphStore;
 use gradient::WebRenderGradient;
 use net_traits::image_cache::Image as CachedImage;
 use paint_api::display_list::{PaintDisplayListInfo, SpatialTreeNodeInfo};
-use paint_api::largest_contentful_paint_candidate::{LCPCandidateID, LargestContentfulPaintType};
+use paint_api::largest_contentful_paint_candidate::LCPCandidateID;
 use servo_arc::Arc as ServoArc;
 use servo_config::opts::DiagnosticsLogging;
 use servo_geometry::MaxRect;
@@ -523,7 +523,6 @@ impl DisplayListBuilder<'_> {
     #[inline]
     fn collect_lcp_candidate(
         &mut self,
-        lcp_type: LargestContentfulPaintType,
         lcp_candidate_id: LCPCandidateID,
         clip_rect: LayoutRect,
         bounds: LayoutRect,
@@ -533,13 +532,7 @@ impl DisplayListBuilder<'_> {
                 .paint_info
                 .scroll_tree
                 .cumulative_node_to_root_transform(self.current_scroll_node_id);
-            lcp_collector.add_or_update_candidate(
-                lcp_type,
-                lcp_candidate_id,
-                clip_rect,
-                bounds,
-                transform,
-            );
+            lcp_collector.add_or_update_candidate(lcp_candidate_id, clip_rect, bounds, transform);
         }
     }
 }
@@ -630,8 +623,6 @@ impl Fragment {
                 let style = image.base.style();
                 match style.get_inherited_box().visibility {
                     Visibility::Visible => {
-                        builder.mark_is_contentful();
-
                         let image_rendering =
                             style.get_inherited_box().image_rendering.to_webrender();
                         let rect = image
@@ -646,6 +637,8 @@ impl Fragment {
                         let common = builder.common_properties(clip, &style);
 
                         if let Some(image_key) = image.image_key {
+                            builder.mark_is_contentful();
+
                             builder.wr().push_image(
                                 &common,
                                 rect,
@@ -669,12 +662,7 @@ impl Fragment {
                             .tag
                             .map(|tag| LCPCandidateID(tag.node.id()))
                             .unwrap_or(LCPCandidateID(0));
-                        builder.collect_lcp_candidate(
-                            LargestContentfulPaintType::Image,
-                            lcp_candidate_id,
-                            common.clip_rect,
-                            rect,
-                        );
+                        builder.collect_lcp_candidate(lcp_candidate_id, common.clip_rect, rect);
                     },
                     Visibility::Hidden => (),
                     Visibility::Collapse => (),
@@ -685,7 +673,10 @@ impl Fragment {
                 let style = iframe.base.style();
                 match style.get_inherited_box().visibility {
                     Visibility::Visible => {
-                        builder.mark_is_contentful();
+                        // From <https://www.w3.org/TR/paint-timing/#mark-paint-timing>:
+                        // > A parent frame should not be aware of the paint events from its child iframes, and
+                        // > vice versa. This means that a frame that contains just iframes will have first paint
+                        // > (due to the enclosing boxes of the iframes) but no first contentful paint.
                         let rect = iframe
                             .base
                             .rect
@@ -1403,7 +1394,6 @@ impl<'a> BuilderForBoxFragment<'a> {
                             .map(|tag| LCPCandidateID(tag.node.id()))
                             .unwrap_or(LCPCandidateID(0));
                         builder.collect_lcp_candidate(
-                            LargestContentfulPaintType::BackgroundImage,
                             lcp_candidate_id,
                             layer.common.clip_rect,
                             layer.bounds,
