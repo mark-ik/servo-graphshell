@@ -22,15 +22,21 @@ use crate::window::ServoShellWindow;
 /// Manage webview lifecycle based on current view.
 ///
 /// - **Graph view**: Save which nodes have webviews (for later restoration),
-///   then destroy all webviews to prevent framebuffer bleed-through.
+///   then destroy all webviews to prevent framebuffer bleed-through unless
+///   `preserve_webviews_in_graph` is true (egui_tiles migration path).
 /// - **Detail view**: Recreate webviews for all previously saved nodes,
 ///   activating the focused node's webview.
 pub(crate) fn manage_lifecycle(
     app: &mut GraphBrowserApp,
     window: &ServoShellWindow,
     state: &Option<Rc<RunningAppState>>,
+    preserve_webviews_in_graph: bool,
 ) {
     if matches!(app.view, View::Graph) {
+        if preserve_webviews_in_graph {
+            return;
+        }
+
         // Only save once when entering graph view (webviews exist but list empty)
         if app.active_webview_nodes.is_empty() && window.webviews().into_iter().next().is_some() {
             // Save node keys before destroying webviews

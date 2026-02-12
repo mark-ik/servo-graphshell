@@ -28,7 +28,16 @@
   - Visual regression snapshots for sample URLs.
 
 ## Findings
-- 
+- Existing tab favicon plumbing already existed (`window.take_pending_favicon_loads` + tab texture cache).
+- The missing path was graph-node integration and persistence.
+- `egui_graphs` supports custom node drawing via `DisplayNode`; this allows favicon rendering in graph view without changing graph interaction handling.
+- Snapshot persistence is the right first persistence step for favicon bytes (log entries are not required for this slice).
 
 ## Progress
 - 2026-02-11: Plan created.
+- 2026-02-12: Implemented favicon vertical slice:
+  - Added favicon fields to node model (`favicon_rgba`, `favicon_width`, `favicon_height`).
+  - Added snapshot persistence support for favicon data (`PersistedNode` extended).
+  - Added custom graph node shape that renders favicon textures when available (falls back to colored circle).
+  - Wired favicon ingestion to persist bytes on mapped graph nodes from pending favicon loads.
+  - Added tests for favicon snapshot/schema roundtrip.

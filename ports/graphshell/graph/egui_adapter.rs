@@ -8,11 +8,15 @@
 //! and reads back user interactions (drag, selection, double-click).
 
 use super::{EdgeType, Graph, Node, NodeKey, NodeLifecycle};
-use egui::{Color32, Pos2};
-use egui_graphs::{DefaultEdgeShape, DefaultNodeShape, to_graph_custom};
+use egui::epaint::{CircleShape, TextShape};
+use egui::{Color32, FontFamily, FontId, Pos2, Rect, Shape, Stroke, TextureHandle, TextureId, Vec2};
+use egui_graphs::{DefaultEdgeShape, DisplayNode, to_graph_custom};
+use egui_graphs::NodeProps;
+use egui_graphs::DrawContext;
 use petgraph::graph::DefaultIx;
 use petgraph::stable_graph::NodeIndex;
 use petgraph::Directed;
+use std::hash::{Hash, Hasher};
 
 /// Type alias for the egui_graphs graph with our node/edge types
 pub type EguiGraph = egui_graphs::Graph<
@@ -20,9 +24,187 @@ pub type EguiGraph = egui_graphs::Graph<
     EdgeType,
     Directed,
     DefaultIx,
-    DefaultNodeShape,
+    GraphNodeShape,
     DefaultEdgeShape,
 >;
+
+/// Node shape that renders favicon textures when available.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct GraphNodeShape {
+    pos: Pos2,
+    selected: bool,
+    dragged: bool,
+    hovered: bool,
+    color: Option<Color32>,
+    label_text: String,
+    radius: f32,
+    favicon_rgba: Option<Vec<u8>>,
+    favicon_width: u32,
+    favicon_height: u32,
+    favicon_hash: u64,
+    #[serde(skip, default)]
+    favicon_handle: Option<TextureHandle>,
+}
+
+impl From<NodeProps<Node>> for GraphNodeShape {
+    fn from(node_props: NodeProps<Node>) -> Self {
+        let mut shape = Self {
+            pos: node_props.location(),
+            selected: node_props.selected,
+            dragged: node_props.dragged,
+            hovered: node_props.hovered,
+            color: node_props.color(),
+            label_text: node_props.label.to_string(),
+            radius: 5.0,
+            favicon_rgba: node_props.payload.favicon_rgba.clone(),
+            favicon_width: node_props.payload.favicon_width,
+            favicon_height: node_props.payload.favicon_height,
+            favicon_hash: 0,
+            favicon_handle: None,
+        };
+        shape.favicon_hash = Self::hash_favicon(&shape.favicon_rgba);
+        shape
+    }
+}
+
+impl DisplayNode<Node, EdgeType, Directed, DefaultIx> for GraphNodeShape {
+    fn is_inside(&self, pos: Pos2) -> bool {
+        (pos - self.pos).length() <= self.radius
+    }
+
+    fn closest_boundary_point(&self, dir: Vec2) -> Pos2 {
+        self.pos + dir.normalized() * self.radius
+    }
+
+    fn shapes(&mut self, ctx: &DrawContext) -> Vec<Shape> {
+        let mut res = Vec::with_capacity(3);
+        let circle_center = ctx.meta.canvas_to_screen_pos(self.pos);
+        let circle_radius = ctx.meta.canvas_to_screen_size(self.radius);
+        let color = self.effective_color(ctx);
+        let stroke = self.effective_stroke(ctx);
+
+        res.push(
+            CircleShape {
+                center: circle_center,
+                radius: circle_radius,
+                fill: color,
+                stroke,
+            }
+            .into(),
+        );
+
+        if let Some(texture_id) = self.ensure_favicon_texture(ctx) {
+            let size = Vec2::splat(circle_radius * 1.5);
+            let rect = Rect::from_center_size(circle_center, size);
+            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+            res.push(Shape::image(texture_id, rect, uv, Color32::WHITE));
+        }
+
+        if !(self.selected || self.dragged || self.hovered) {
+            return res;
+        }
+
+        let galley = self.label_galley(ctx, circle_radius, color);
+        let label_pos = Pos2::new(center_x(galley.size().x, circle_center.x), circle_center.y - circle_radius * 2.0);
+        res.push(TextShape::new(label_pos, galley, color).into());
+        res
+    }
+
+    fn update(&mut self, state: &NodeProps<Node>) {
+        self.pos = state.location();
+        self.selected = state.selected;
+        self.dragged = state.dragged;
+        self.hovered = state.hovered;
+        self.label_text = state.label.to_string();
+        self.color = state.color();
+
+        let new_rgba = state.payload.favicon_rgba.clone();
+        let new_hash = Self::hash_favicon(&new_rgba);
+        if new_hash != self.favicon_hash ||
+            self.favicon_width != state.payload.favicon_width ||
+            self.favicon_height != state.payload.favicon_height
+        {
+            self.favicon_rgba = new_rgba;
+            self.favicon_width = state.payload.favicon_width;
+            self.favicon_height = state.payload.favicon_height;
+            self.favicon_hash = new_hash;
+            self.favicon_handle = None;
+        }
+    }
+}
+
+impl GraphNodeShape {
+    fn effective_color(&self, ctx: &DrawContext) -> Color32 {
+        if let Some(c) = self.color {
+            return c;
+        }
+        let style = if self.selected || self.dragged || self.hovered {
+            ctx.ctx.style().visuals.widgets.active
+        } else {
+            ctx.ctx.style().visuals.widgets.inactive
+        };
+        style.fg_stroke.color
+    }
+
+    fn effective_stroke(&self, ctx: &DrawContext) -> Stroke {
+        let _ = ctx;
+        Stroke::default()
+    }
+
+    fn label_galley(
+        &self,
+        ctx: &DrawContext,
+        radius: f32,
+        color: Color32,
+    ) -> std::sync::Arc<egui::Galley> {
+        ctx.ctx.fonts_mut(|f| {
+            f.layout_no_wrap(
+                self.label_text.clone(),
+                FontId::new(radius, FontFamily::Monospace),
+                color,
+            )
+        })
+    }
+
+    fn ensure_favicon_texture(&mut self, ctx: &DrawContext) -> Option<TextureId> {
+        if self.favicon_handle.is_none() {
+            let rgba = self.favicon_rgba.as_ref()?;
+            if self.favicon_width == 0 || self.favicon_height == 0 {
+                return None;
+            }
+
+            let expected_len = self.favicon_width as usize * self.favicon_height as usize * 4;
+            if rgba.len() != expected_len {
+                return None;
+            }
+
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [self.favicon_width as usize, self.favicon_height as usize],
+                rgba,
+            );
+            let handle = ctx.ctx.load_texture(
+                format!("graph-node-favicon-{}", self.favicon_hash),
+                image,
+                Default::default(),
+            );
+            self.favicon_handle = Some(handle);
+        }
+        self.favicon_handle.as_ref().map(|h| h.id())
+    }
+
+    fn hash_favicon(data: &Option<Vec<u8>>) -> u64 {
+        let Some(bytes) = data else {
+            return 0;
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+fn center_x(width: f32, center_x: f32) -> f32 {
+    center_x - width / 2.0
+}
 
 /// Converted egui_graphs representation.
 pub struct EguiGraphState {
@@ -38,7 +220,7 @@ impl EguiGraphState {
     pub fn from_graph(graph: &Graph) -> Self {
         let egui_graph: EguiGraph = to_graph_custom(
             &graph.inner,
-            |node: &mut egui_graphs::Node<Node, EdgeType, Directed, DefaultIx, DefaultNodeShape>| {
+            |node: &mut egui_graphs::Node<Node, EdgeType, Directed, DefaultIx, GraphNodeShape>| {
                 // Extract all data from payload before any mutations
                 let position = node.payload().position;
                 let title = node.payload().title.clone();

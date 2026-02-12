@@ -1,0 +1,79 @@
+# egui_tiles Implementation Plan (2026-02-12)
+
+## egui_tiles Plan
+- Scope: Begin migration from monolithic `desktop/gui.rs` layout branching to `egui_tiles` pane-based layout.
+- Phase 1: Add dependency and compile-safe scaffolding (`TileKind`, initial `Behavior`, tree initialization).
+- Phase 2: Wire graph pane rendering through `Behavior::pane_ui` while preserving existing detail-view behavior.
+- Phase 3: Introduce WebView pane flow (`TileKind::WebView(NodeKey)`) and tab title plumbing from graph state.
+- Phase 4: Replace manual graph/detail toggle with tile creation/focus and per-pane rendering contexts.
+
+## Findings
+- Design docs consistently converge on egui_tiles as the chosen architecture:
+  - `2026-02-12_architecture_reconciliation.md`
+  - `2026-02-12_servoshell_inheritance_analysis.md`
+  - `2026-02-12_egui_tiles_implementation_guide.md`
+- Current favicon/thumbnail vertical slice remains compatible; most migration impact is in `desktop/gui.rs` layout/event orchestration.
+- `render::render_graph` was `CentralPanel`-bound, so pane integration required extracting a `Ui`-scoped graph renderer for `egui_tiles::Behavior::pane_ui`.
+- `GraphAction::FocusNode` can be intercepted in tile behavior, allowing graph double-click to open/focus a `WebView(NodeKey)` tile while other graph actions continue through shared action application.
+- WebView lifecycle and input gating were previously keyed only to `app.view`; that conflicts with graph-mode WebView tiles and must be made tile-aware before pane rendering can work.
+
+## Progress
+- Reviewed design docs inventory and active architecture docs.
+- Started implementation:
+  - Added `egui_tiles` dependency.
+  - Added `desktop/tile_kind.rs` (`TileKind` scaffold).
+  - Added `desktop/tile_behavior.rs` (`GraphshellTileBehavior` scaffold).
+  - Added `Tree<TileKind>` initialization into `Gui::new()`.
+- Phase 2 integration pass completed:
+  - Added `render::render_graph_in_ui(ui, app)` for pane-safe rendering.
+  - Updated `GraphshellTileBehavior::pane_ui` to render graph content (not placeholder text).
+  - Routed graph-mode GUI rendering through `tiles_tree.ui(&mut behavior, ui)`.
+  - Preserved detail-view rendering path unchanged.
+  - `cargo check -p graphshell` passes.
+  - `cargo test -p graphshell test_focus_node_action` passes.
+- Phase 3 tile open/focus scaffold completed:
+  - Added `render::render_graph_in_ui_collect_actions(ui, app) -> Vec<GraphAction>`.
+  - Updated `GraphshellTileBehavior` to intercept `GraphAction::FocusNode`, keep node selection, and queue node IDs for tile opening.
+  - Added GUI post-render tile handling:
+    - Focus existing `TileKind::WebView(node_key)` tab if present.
+    - Create `WebView(node_key)` pane if absent.
+    - Promote root to a tabs container on first webview pane insert.
+  - Added tab behavior: graph tab is non-closable; webview tabs are closable.
+  - Temporary migration behavior in graph mode:
+    - Double-click opens/focuses a webview tile scaffold instead of switching directly to detail view.
+- Deviation approved and implemented (tile-driven lifecycle/input gating):
+  - Updated graph-mode input consumption to allow events through when a `WebView` tile is active.
+  - Updated lifecycle call site to pass `preserve_webviews_in_graph` when graph mode has any `WebView` tiles.
+  - Updated sync gating to allow `sync_to_graph` while graph mode hosts WebView tiles.
+  - Updated `webview_controller::manage_lifecycle` with a `preserve_webviews_in_graph` parameter to avoid destructive graph-mode teardown in tile flow.
+  - Validation:
+    - `cargo check -p graphshell` passes.
+    - `cargo test -p graphshell test_focus_node_action` passes.
+    - `cargo test -p graphshell test_toggle_view_from_graph_to_detail` passes.
+- Phase 4 rendering slice (active WebView tile):
+  - `GraphshellTileBehavior` now reports the active `WebView(NodeKey)` pane each frame.
+  - Graph-mode path now:
+    - ensures a webview exists for active webview tile node,
+    - activates that webview in `WebViewCollection`,
+    - repaints and composites it into the active tile rect via `render_to_parent_callback`.
+  - Added helpers in `Gui`:
+    - `active_webview_tile_rect(...)`
+    - `ensure_webview_for_node(...)`
+  - Validation:
+    - `cargo check -p graphshell` passes.
+    - `cargo test -p graphshell test_focus_node_action` passes.
+    - `cargo test -p graphshell test_toggle_view_from_graph_to_detail` passes.
+- Phase 4 lifecycle/cleanup extension:
+  - `GraphshellTileBehavior` now reports:
+    - active WebView tile nodes (visible panes),
+    - pending closed WebView tile nodes (`on_tab_close`).
+  - Graph-mode runtime now:
+    - closes webviews when WebView tiles are closed,
+    - prunes mapped webviews that no longer have a corresponding WebView tile,
+    - ensures webviews exist for all active WebView tiles,
+    - activates the first active WebView tile's webview for input/paint routing.
+  - Composite target selection now prefers the currently active webview's matching tile rect, with fallback to first active WebView tile rect.
+  - Validation:
+    - `cargo check -p graphshell` passes.
+    - `cargo test -p graphshell test_focus_node_action` passes.
+    - `cargo test -p graphshell test_toggle_view_from_graph_to_detail` passes.

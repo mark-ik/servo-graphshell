@@ -52,6 +52,15 @@ pub struct Node {
     /// Timestamp of last visit
     pub last_visited: std::time::SystemTime,
 
+    /// Optional favicon pixel data (RGBA8), persisted in snapshots.
+    pub favicon_rgba: Option<Vec<u8>>,
+
+    /// Favicon width in pixels (valid when `favicon_rgba` is `Some`).
+    pub favicon_width: u32,
+
+    /// Favicon height in pixels (valid when `favicon_rgba` is `Some`).
+    pub favicon_height: u32,
+
     /// Webview lifecycle state
     pub lifecycle: NodeLifecycle,
 }
@@ -114,6 +123,9 @@ impl Graph {
             is_selected: false,
             is_pinned: false,
             last_visited: now,
+            favicon_rgba: None,
+            favicon_width: 0,
+            favicon_height: 0,
             lifecycle: NodeLifecycle::Cold,
         });
 
@@ -221,6 +233,9 @@ impl Graph {
                 position_x: node.position.x,
                 position_y: node.position.y,
                 is_pinned: node.is_pinned,
+                favicon_rgba: node.favicon_rgba.clone(),
+                favicon_width: node.favicon_width,
+                favicon_height: node.favicon_height,
             })
             .collect();
 
@@ -268,6 +283,9 @@ impl Graph {
             if let Some(node) = graph.get_node_mut(key) {
                 node.title = pnode.title.clone();
                 node.is_pinned = pnode.is_pinned;
+                node.favicon_rgba = pnode.favicon_rgba.clone();
+                node.favicon_width = pnode.favicon_width;
+                node.favicon_height = pnode.favicon_height;
             }
         }
 
@@ -572,6 +590,25 @@ mod tests {
         assert!(has_history);
     }
 
+    #[test]
+    fn test_snapshot_preserves_favicon_data() {
+        let mut graph = Graph::new();
+        let key = graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
+        let favicon = vec![255, 0, 0, 255];
+        if let Some(node) = graph.get_node_mut(key) {
+            node.favicon_rgba = Some(favicon.clone());
+            node.favicon_width = 1;
+            node.favicon_height = 1;
+        }
+
+        let snapshot = graph.to_snapshot();
+        let restored = Graph::from_snapshot(&snapshot);
+        let (_, restored_node) = restored.get_node_by_url("https://a.com").unwrap();
+        assert_eq!(restored_node.favicon_rgba.as_ref(), Some(&favicon));
+        assert_eq!(restored_node.favicon_width, 1);
+        assert_eq!(restored_node.favicon_height, 1);
+    }
+
     // --- TEST-3: from_snapshot edge cases ---
 
     #[test]
@@ -586,6 +623,9 @@ mod tests {
                     position_x: 0.0,
                     position_y: 0.0,
                     is_pinned: false,
+                    favicon_rgba: None,
+                    favicon_width: 0,
+                    favicon_height: 0,
                 },
             ],
             edges: vec![
@@ -617,6 +657,9 @@ mod tests {
                     position_x: 0.0,
                     position_y: 0.0,
                     is_pinned: false,
+                    favicon_rgba: None,
+                    favicon_width: 0,
+                    favicon_height: 0,
                 },
                 PersistedNode {
                     url: "https://same.com".to_string(),
@@ -624,6 +667,9 @@ mod tests {
                     position_x: 100.0,
                     position_y: 100.0,
                     is_pinned: false,
+                    favicon_rgba: None,
+                    favicon_width: 0,
+                    favicon_height: 0,
                 },
             ],
             edges: vec![],

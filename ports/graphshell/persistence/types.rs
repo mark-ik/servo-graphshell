@@ -17,6 +17,9 @@ pub struct PersistedNode {
     pub position_x: f32,
     pub position_y: f32,
     pub is_pinned: bool,
+    pub favicon_rgba: Option<Vec<u8>>,
+    pub favicon_width: u32,
+    pub favicon_height: u32,
 }
 
 /// Edge type for persistence
@@ -86,6 +89,9 @@ mod tests {
             position_x: 100.0,
             position_y: 200.0,
             is_pinned: true,
+            favicon_rgba: Some(vec![255, 0, 0, 255]),
+            favicon_width: 1,
+            favicon_height: 1,
         };
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&node).unwrap();
@@ -95,6 +101,9 @@ mod tests {
         assert_eq!(archived.position_x, 100.0);
         assert_eq!(archived.position_y, 200.0);
         assert!(archived.is_pinned);
+        assert_eq!(archived.favicon_rgba.as_ref().unwrap().len(), 4);
+        assert_eq!(archived.favicon_width, 1);
+        assert_eq!(archived.favicon_height, 1);
     }
 
     #[test]
@@ -122,6 +131,9 @@ mod tests {
                     position_x: 0.0,
                     position_y: 0.0,
                     is_pinned: false,
+                    favicon_rgba: None,
+                    favicon_width: 0,
+                    favicon_height: 0,
                 },
                 PersistedNode {
                     url: "https://b.com".to_string(),
@@ -129,6 +141,9 @@ mod tests {
                     position_x: 100.0,
                     position_y: 100.0,
                     is_pinned: true,
+                    favicon_rgba: Some(vec![10, 20, 30, 255]),
+                    favicon_width: 1,
+                    favicon_height: 1,
                 },
             ],
             edges: vec![PersistedEdge {

@@ -89,6 +89,12 @@
 | **[implementation_strategy/2026-02-11_phase1_refinement_plan.md](implementation_strategy/2026-02-11_phase1_refinement_plan.md)** | **Active:** Phase 1 refinement (11 steps) | Current work reference |
 | **[implementation_strategy/2026-02-12_persistence_ux_plan.md](implementation_strategy/2026-02-12_persistence_ux_plan.md)** | Persistence reset UX plan | Reference (completed) |
 
+**Architecture Plans**
+
+- **[implementation_strategy/2026-02-12_architecture_reconciliation.md](implementation_strategy/2026-02-12_architecture_reconciliation.md)** — **Required reading:** Reconciles two architectural proposals, defines egui_tiles approach
+- **[implementation_strategy/2026-02-12_servoshell_inheritance_analysis.md](implementation_strategy/2026-02-12_servoshell_inheritance_analysis.md)** — What to keep/replace from servoshell, egui_tiles integration plan
+- **[implementation_strategy/2026-02-12_egui_tiles_implementation_guide.md](implementation_strategy/2026-02-12_egui_tiles_implementation_guide.md)** — **Step-by-step guide:** Concrete API calls, code examples, 7-phase migration plan
+
 **Feature Plans (by target)**
 
 - **[implementation_strategy/2026-02-11_thumbnails_favicons_plan.md](implementation_strategy/2026-02-11_thumbnails_favicons_plan.md)** — Feature Target 2
@@ -113,6 +119,8 @@
 ### 7. Archive
 
 - **[archive_docs/](../archive_docs/)** — Superseded analyses, historical reference, checkpoint snapshots
+- **[archive_docs/alternative_approaches/](../archive_docs/alternative_approaches/)** — Alternative architectural proposals not pursued
+  - [2026-02-12_unified_architecture_plan_ARCHIVED.md](../archive_docs/alternative_approaches/2026-02-12_unified_architecture_plan_ARCHIVED.md) — Continuous zoom approach (not pursued)
 
 ---
 

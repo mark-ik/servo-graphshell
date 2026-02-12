@@ -19,5 +19,7 @@ mod headless_window;
 mod keyutils;
 mod protocols;
 mod tracing;
+mod tile_kind;
+mod tile_behavior;
 #[cfg(feature = "webxr")]
 mod webxr;

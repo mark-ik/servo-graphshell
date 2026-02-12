@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use egui::{
     Button, Key, Label, LayerId, Modifiers, PaintCallback, TopBottomPanel, Vec2, WidgetInfo,
     WidgetType, pos2,
 };
+use egui_tiles::{Container, Tile, Tiles, Tree};
 use egui_glow::{CallbackFn, EguiGlow};
 use egui_winit::EventResponse;
 use euclid::{Length, Point2D, Rect, Scale, Size2D};
@@ -29,7 +30,9 @@ use winit::window::Window;
 
 use crate::desktop::event_loop::AppEvent;
 use crate::desktop::headed_window;
+use super::tile_behavior::GraphshellTileBehavior;
 use super::webview_controller;
+use super::tile_kind::TileKind;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
 use crate::app::GraphBrowserApp;
@@ -41,6 +44,8 @@ use crate::render;
 pub struct Gui {
     rendering_context: Rc<OffscreenRenderingContext>,
     context: EguiGlow,
+    /// Tile tree scaffold for upcoming egui_tiles layout migration.
+    tiles_tree: Tree<TileKind>,
     toolbar_height: Length<f32, DeviceIndependentPixel>,
 
     location: String,
@@ -136,6 +141,10 @@ impl Gui {
             None => GraphBrowserApp::new(),
         };
 
+        let mut tiles = Tiles::default();
+        let graph_tile_id = tiles.insert_pane(TileKind::Graph);
+        let tiles_tree = Tree::new("graphshell_tiles", graph_tile_id, tiles);
+
         // Only create initial node if graph wasn't recovered from persistence
         if !graph_app.has_recovered_graph() {
             use euclid::default::Point2D;
@@ -148,6 +157,7 @@ impl Gui {
         Self {
             rendering_context,
             context,
+            tiles_tree,
             toolbar_height: Default::default(),
             location: initial_url.to_string(),
             location_dirty: false,
@@ -195,8 +205,9 @@ impl Gui {
     ) -> EventResponse {
         let mut response = self.context.on_window_event(winit_window, event);
 
-        // In graph view, consume all user input events so they never reach the WebView.
-        if matches!(self.graph_app.view, crate::app::View::Graph) {
+        // In graph view, consume user input events so they never reach a hidden WebView.
+        // If a WebView tile is active, allow events through for that pane.
+        if matches!(self.graph_app.view, crate::app::View::Graph) && !self.has_active_webview_tile() {
             match event {
                 WindowEvent::KeyboardInput { .. }
                 | WindowEvent::ModifiersChanged(_)
@@ -335,9 +346,11 @@ impl Gui {
         self.rendering_context
             .make_current()
             .expect("Could not make RenderingContext current");
+        self.ensure_tiles_tree_root();
         let Self {
             rendering_context,
             context,
+            tiles_tree,
             toolbar_height,
             location,
             location_dirty,
@@ -352,7 +365,7 @@ impl Gui {
 
         let winit_window = headed_window.winit_window();
         context.run(winit_window, |ctx| {
-            load_pending_favicons(ctx, window, favicon_textures);
+            load_pending_favicons(ctx, window, graph_app, favicon_textures);
 
             // Handle keyboard shortcuts regardless of view (e.g., toggle view)
             let keyboard_actions = input::collect_actions(ctx);
@@ -374,12 +387,22 @@ impl Gui {
 
             // Check which view mode we're in (used throughout rendering)
             let is_graph_view = matches!(graph_app.view, crate::app::View::Graph);
+            let preserve_webviews_in_graph = is_graph_view && tiles_tree
+                .tiles
+                .iter()
+                .any(|(_, tile)| matches!(tile, Tile::Pane(TileKind::WebView(_))));
+            let should_sync_webviews = !is_graph_view || preserve_webviews_in_graph;
 
             // Webview lifecycle management (create/destroy based on view)
-            webview_controller::manage_lifecycle(graph_app, window, app_state);
+            webview_controller::manage_lifecycle(
+                graph_app,
+                window,
+                app_state,
+                preserve_webviews_in_graph,
+            );
 
             // Sync webviews to graph nodes (only in detail view — graph view has no webviews)
-            if !is_graph_view {
+            if should_sync_webviews {
                 webview_controller::sync_to_graph(graph_app, webview_previous_url, window);
             }
 
@@ -643,7 +666,79 @@ impl Gui {
             // EXCLUSIVE VIEW RENDERING: Only one of these executes per frame
             if is_graph_view {
                 // === GRAPH VIEW: Only render the spatial graph ===
-                render::render_graph(ctx, graph_app);
+                let mut pending_open_nodes = Vec::new();
+                let mut active_webview_nodes = Vec::new();
+                let mut pending_closed_nodes = Vec::new();
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::new().fill(egui::Color32::from_rgb(20, 20, 25)))
+                    .show(ctx, |ui| {
+                        let mut behavior = GraphshellTileBehavior::new(graph_app);
+                        tiles_tree.ui(&mut behavior, ui);
+                        pending_open_nodes.extend(behavior.take_pending_open_nodes());
+                        active_webview_nodes.extend(behavior.take_active_webview_nodes());
+                        pending_closed_nodes.extend(behavior.take_pending_closed_nodes());
+                    });
+                for node_key in pending_open_nodes {
+                    Self::open_or_focus_webview_tile(tiles_tree, node_key);
+                }
+                for node_key in pending_closed_nodes {
+                    Self::close_webview_for_node(
+                        graph_app,
+                        window,
+                        webview_previous_url,
+                        node_key,
+                    );
+                }
+
+                // Keep runtime webviews aligned with the current tile tree.
+                let tile_nodes = Self::all_webview_tile_nodes(tiles_tree);
+                let mapped_nodes: Vec<_> = graph_app
+                    .webview_node_mappings()
+                    .map(|(_, node_key)| node_key)
+                    .collect();
+                for node_key in mapped_nodes {
+                    if !tile_nodes.contains(&node_key) {
+                        Self::close_webview_for_node(
+                            graph_app,
+                            window,
+                            webview_previous_url,
+                            node_key,
+                        );
+                    }
+                }
+
+                for node_key in active_webview_nodes.iter().copied() {
+                    Self::ensure_webview_for_node(graph_app, window, app_state, node_key);
+                }
+                if let Some(node_key) = active_webview_nodes.first().copied()
+                    && let Some(wv_id) = graph_app.get_webview_for_node(node_key)
+                {
+                    window.activate_webview(wv_id);
+                }
+
+                // Render the active webview tile via the existing offscreen callback path.
+                let active_node_for_composite = window
+                    .active_webview()
+                    .and_then(|wv| graph_app.get_node_for_webview(wv.id()));
+                let tile_rect = active_node_for_composite
+                    .and_then(|node_key| Self::webview_tile_rect_for_node(tiles_tree, node_key))
+                    .or_else(|| Self::active_webview_tile_rect(tiles_tree).map(|(_, rect)| rect));
+                if let Some(tile_rect) = tile_rect {
+                    window.repaint_webviews();
+                    if let Some(render_to_parent) = rendering_context.render_to_parent_callback() {
+                        ctx.layer_painter(LayerId::background()).add(PaintCallback {
+                            rect: tile_rect,
+                            callback: Arc::new(CallbackFn::new(move |info, painter| {
+                                let clip = info.viewport_in_pixels();
+                                let rect_in_parent = Rect::new(
+                                    Point2D::new(clip.left_px, clip.from_bottom_px),
+                                    Size2D::new(clip.width_px, clip.height_px),
+                                );
+                                render_to_parent(painter.gl(), rect_in_parent)
+                            })),
+                        });
+                    }
+                }
 
             } else {
                 // === DETAIL VIEW: Only render the webview ===
@@ -697,6 +792,116 @@ impl Gui {
             render::render_physics_panel(ctx, graph_app);
             render::render_help_panel(ctx, graph_app);
         });
+    }
+
+    fn ensure_tiles_tree_root(&mut self) {
+        if self.tiles_tree.root().is_none() {
+            let graph_tile_id = self.tiles_tree.tiles.insert_pane(TileKind::Graph);
+            self.tiles_tree.root = Some(graph_tile_id);
+        }
+    }
+
+    fn has_active_webview_tile(&self) -> bool {
+        self.tiles_tree
+            .active_tiles()
+            .into_iter()
+            .any(|tile_id| {
+                matches!(
+                    self.tiles_tree.tiles.get(tile_id),
+                    Some(Tile::Pane(TileKind::WebView(_)))
+                )
+            })
+    }
+
+    fn active_webview_tile_rect(tiles_tree: &Tree<TileKind>) -> Option<(crate::graph::NodeKey, egui::Rect)> {
+        for tile_id in tiles_tree.active_tiles() {
+            if let Some(Tile::Pane(TileKind::WebView(node_key))) = tiles_tree.tiles.get(tile_id) {
+                if let Some(rect) = tiles_tree.tiles.rect(tile_id) {
+                    return Some((*node_key, rect));
+                }
+            }
+        }
+        None
+    }
+
+    fn webview_tile_rect_for_node(
+        tiles_tree: &Tree<TileKind>,
+        target_node: crate::graph::NodeKey,
+    ) -> Option<egui::Rect> {
+        for tile_id in tiles_tree.active_tiles() {
+            if let Some(Tile::Pane(TileKind::WebView(node_key))) = tiles_tree.tiles.get(tile_id)
+                && *node_key == target_node
+            {
+                return tiles_tree.tiles.rect(tile_id);
+            }
+        }
+        None
+    }
+
+    fn all_webview_tile_nodes(tiles_tree: &Tree<TileKind>) -> HashSet<crate::graph::NodeKey> {
+        tiles_tree
+            .tiles
+            .iter()
+            .filter_map(|(_, tile)| match tile {
+                Tile::Pane(TileKind::WebView(node_key)) => Some(*node_key),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ensure_webview_for_node(
+        graph_app: &mut GraphBrowserApp,
+        window: &ServoShellWindow,
+        app_state: &Option<Rc<RunningAppState>>,
+        node_key: crate::graph::NodeKey,
+    ) {
+        if graph_app.get_webview_for_node(node_key).is_some() {
+            return;
+        }
+        let (Some(node), Some(state)) = (graph_app.graph.get_node(node_key), app_state.as_ref()) else {
+            return;
+        };
+        let url = Url::parse(&node.url).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
+        let webview = window.create_toplevel_webview(state.clone(), url);
+        graph_app.map_webview_to_node(webview.id(), node_key);
+        graph_app.promote_node_to_active(node_key);
+    }
+
+    fn close_webview_for_node(
+        graph_app: &mut GraphBrowserApp,
+        window: &ServoShellWindow,
+        previous_urls: &mut HashMap<WebViewId, Url>,
+        node_key: crate::graph::NodeKey,
+    ) {
+        if let Some(wv_id) = graph_app.get_webview_for_node(node_key) {
+            window.close_webview(wv_id);
+            graph_app.unmap_webview(wv_id);
+            previous_urls.remove(&wv_id);
+        }
+        graph_app.demote_node_to_cold(node_key);
+    }
+
+    fn open_or_focus_webview_tile(tiles_tree: &mut Tree<TileKind>, node_key: crate::graph::NodeKey) {
+        if tiles_tree.make_active(|_, tile| matches!(tile, Tile::Pane(TileKind::WebView(key)) if *key == node_key)) {
+            return;
+        }
+
+        let webview_tile_id = tiles_tree.tiles.insert_pane(TileKind::WebView(node_key));
+        let Some(root_id) = tiles_tree.root() else {
+            tiles_tree.root = Some(webview_tile_id);
+            return;
+        };
+
+        if let Some(Tile::Container(Container::Tabs(tabs))) = tiles_tree.tiles.get_mut(root_id) {
+            tabs.add_child(webview_tile_id);
+            tabs.set_active(webview_tile_id);
+            return;
+        }
+
+        let tabs_root = tiles_tree
+            .tiles
+            .insert_tab_tile(vec![root_id, webview_tile_id]);
+        tiles_tree.root = Some(tabs_root);
     }
 
     /// Paint the GUI, as of the last update.
@@ -824,41 +1029,49 @@ impl Gui {
     }
 }
 
-fn embedder_image_to_egui_image(image: &Image) -> egui::ColorImage {
+/// Convert a Servo image to RGBA8 bytes.
+fn embedder_image_to_rgba(image: &Image) -> (usize, usize, Vec<u8>) {
     let width = image.width as usize;
     let height = image.height as usize;
 
-    match image.format {
-        PixelFormat::K8 => egui::ColorImage::from_gray([width, height], image.data()),
+    let data = match image.format {
+        PixelFormat::K8 => image
+            .data()
+            .iter()
+            .flat_map(|&v| [v, v, v, 255])
+            .collect(),
         PixelFormat::KA8 => {
             // Convert to rgba
-            let data: Vec<u8> = image
+            image
                 .data()
                 .chunks_exact(2)
                 .flat_map(|pixel| [pixel[0], pixel[0], pixel[0], pixel[1]])
-                .collect();
-            egui::ColorImage::from_rgba_unmultiplied([width, height], &data)
+                .collect()
         },
-        PixelFormat::RGB8 => egui::ColorImage::from_rgb([width, height], image.data()),
-        PixelFormat::RGBA8 => {
-            egui::ColorImage::from_rgba_unmultiplied([width, height], image.data())
-        },
+        PixelFormat::RGB8 => image
+            .data()
+            .chunks_exact(3)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
+            .collect(),
+        PixelFormat::RGBA8 => image.data().to_vec(),
         PixelFormat::BGRA8 => {
             // Convert from BGRA to RGBA
-            let data: Vec<u8> = image
+            image
                 .data()
                 .chunks_exact(4)
                 .flat_map(|chunk| [chunk[2], chunk[1], chunk[0], chunk[3]])
-                .collect();
-            egui::ColorImage::from_rgba_unmultiplied([width, height], &data)
+                .collect()
         },
-    }
+    };
+
+    (width, height, data)
 }
 
 /// Uploads all favicons that have not yet been processed to the GPU.
 fn load_pending_favicons(
     ctx: &egui::Context,
     window: &ServoShellWindow,
+    graph_app: &mut GraphBrowserApp,
     texture_cache: &mut HashMap<WebViewId, (egui::TextureHandle, egui::load::SizedTexture)>,
 ) {
     for id in window.take_pending_favicon_loads() {
@@ -869,7 +1082,8 @@ fn load_pending_favicons(
             continue;
         };
 
-        let egui_image = embedder_image_to_egui_image(&favicon);
+        let (width, height, rgba) = embedder_image_to_rgba(&favicon);
+        let egui_image = egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba);
         let handle = ctx.load_texture(format!("favicon-{id:?}"), egui_image, Default::default());
         let texture = egui::load::SizedTexture::new(
             handle.id(),
@@ -879,5 +1093,14 @@ fn load_pending_favicons(
         // We don't need the handle anymore but we can't drop it either since that would cause
         // the texture to be freed.
         texture_cache.insert(id, (handle, texture));
+
+        if let Some(node_key) = graph_app.get_node_for_webview(id) {
+            if let Some(node) = graph_app.graph.get_node_mut(node_key) {
+                node.favicon_rgba = Some(rgba);
+                node.favicon_width = width as u32;
+                node.favicon_height = height as u32;
+                graph_app.egui_state_dirty = true;
+            }
+        }
     }
 }

@@ -24,6 +24,10 @@ ports/graphshell/design_docs/graphshell_docs/
 - **Tests:** 137 passing
 - **Last Commit:** `9a31975d2a1`
 
+## Working Principles
+
+- **Verify, don't assume.** When the user makes a claim, determine whether it's true rather than assuming it is. Only take claims at face value when explicitly asked to.
+
 ## Configuration
 
 - **settings.local.json** — Allowed commands and domains for AI operations

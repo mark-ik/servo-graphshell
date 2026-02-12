@@ -8,13 +8,13 @@
 //! which provides built-in navigation (zoom/pan), node dragging, and selection.
 
 use crate::app::{GraphBrowserApp, View};
-use crate::graph::egui_adapter::EguiGraphState;
+use crate::graph::egui_adapter::{EguiGraphState, GraphNodeShape};
 use crate::graph::NodeKey;
 use crate::physics::PhysicsConfig;
-use egui::{CentralPanel, Color32, Vec2, Window};
+use egui::{CentralPanel, Color32, Ui, Vec2, Window};
 use egui_graphs::events::Event;
 use egui_graphs::{
-    DefaultEdgeShape, DefaultNodeShape, GraphView, LayoutRandom, LayoutStateRandom,
+    DefaultEdgeShape, GraphView, LayoutRandom, LayoutStateRandom,
     MetadataFrame, SettingsInteraction, SettingsNavigation, SettingsStyle,
 };
 use euclid::default::Point2D;
@@ -37,7 +37,48 @@ pub enum GraphAction {
 }
 
 /// Render the graph view using egui_graphs
+#[allow(dead_code)] // Legacy full-screen entrypoint retained during egui_tiles migration.
 pub fn render_graph(ctx: &egui::Context, app: &mut GraphBrowserApp) {
+    CentralPanel::default()
+        .frame(egui::Frame::new().fill(Color32::from_rgb(20, 20, 25)))
+        .show(ctx, |ui| {
+            render_graph_in_ui(ui, app);
+        });
+
+    // Capture overlay position after CentralPanel consumes remaining space
+    let overlay_top_y = ctx.available_rect().min.y;
+
+    // Draw info overlay using Area (not CentralPanel, which would steal mouse events)
+    egui::Area::new(egui::Id::new("graph_info_overlay"))
+        .fixed_pos(egui::pos2(0.0, overlay_top_y))
+        .interactable(false)
+        .show(ctx, |ui| {
+            draw_graph_info(ui, app);
+        });
+}
+
+/// Render graph content inside an arbitrary `egui::Ui` container.
+///
+/// This is used by egui_tiles panes where the parent layout is already managed.
+pub fn render_graph_in_ui(ui: &mut Ui, app: &mut GraphBrowserApp) {
+    let actions = render_graph_in_ui_collect_actions(ui, app);
+    apply_graph_actions(app, actions);
+    render_graph_info_in_ui(ui, app);
+}
+
+/// Render graph info and controls hint overlay text into the current UI.
+pub fn render_graph_info_in_ui(ui: &mut Ui, app: &GraphBrowserApp) {
+    draw_graph_info(ui, app);
+}
+
+/// Render graph content and return resolved interaction actions.
+///
+/// This lets callers customize how specific actions are handled
+/// (e.g. routing double-click to tile opening instead of detail view).
+pub fn render_graph_in_ui_collect_actions(
+    ui: &mut Ui,
+    app: &mut GraphBrowserApp,
+) -> Vec<GraphAction> {
     // Build or reuse egui_graphs state (only rebuild when graph structure changes)
     if app.egui_state.is_none() || app.egui_state_dirty {
         app.egui_state = Some(EguiGraphState::from_graph(&app.graph));
@@ -63,51 +104,35 @@ pub fn render_graph(ctx: &egui::Context, app: &mut GraphBrowserApp) {
     let style = SettingsStyle::new()
         .with_labels_always(true);
 
-    // Capture overlay position before CentralPanel consumes remaining space
-    let overlay_top_y = ctx.available_rect().min.y;
-
     // Render the graph (nested scope for mutable borrow)
     {
         let state = app.egui_state.as_mut().expect("egui_state should be initialized");
 
-        CentralPanel::default()
-            .frame(egui::Frame::new().fill(Color32::from_rgb(20, 20, 25)))
-            .show(ctx, |ui| {
-                ui.add(
-                    &mut GraphView::<
-                        _,
-                        _,
-                        _,
-                        _,
-                        DefaultNodeShape,
-                        DefaultEdgeShape,
-                        LayoutStateRandom,
-                        LayoutRandom,
-                    >::new(&mut state.graph)
-                    .with_navigations(&nav)
-                    .with_interactions(&interaction)
-                    .with_styles(&style)
-                    .with_event_sink(&events),
-                );
-            });
+        ui.add(
+            &mut GraphView::<
+                _,
+                _,
+                _,
+                _,
+                GraphNodeShape,
+                DefaultEdgeShape,
+                LayoutStateRandom,
+                LayoutRandom,
+            >::new(&mut state.graph)
+            .with_navigations(&nav)
+            .with_interactions(&interaction)
+            .with_styles(&style)
+            .with_event_sink(&events),
+        );
     } // Drop mutable borrow of app.egui_state here
-
-    // Draw info overlay using Area (not CentralPanel, which would steal mouse events)
-    egui::Area::new(egui::Id::new("graph_info_overlay"))
-        .fixed_pos(egui::pos2(0.0, overlay_top_y))
-        .interactable(false)
-        .show(ctx, |ui| {
-            draw_graph_info(ui, app);
-        });
 
     // Reset fit_to_screen flag (one-shot behavior for 'C' key)
     app.fit_to_screen_requested = false;
 
     // Post-frame zoom clamp: enforce min/max bounds on egui_graphs zoom
-    clamp_zoom(ctx, app);
+    clamp_zoom(ui.ctx(), app);
 
-    // Process interaction events
-    process_events(app, &events);
+    collect_graph_actions(app, &events)
 }
 
 /// Clamp the egui_graphs zoom to the camera's min/max bounds.
@@ -127,10 +152,10 @@ fn clamp_zoom(ctx: &egui::Context, app: &mut GraphBrowserApp) {
 }
 
 /// Convert egui_graphs events to resolved GraphActions and apply them.
-fn process_events(
-    app: &mut GraphBrowserApp,
+fn collect_graph_actions(
+    app: &GraphBrowserApp,
     events: &Rc<RefCell<Vec<Event>>>,
-) {
+) -> Vec<GraphAction> {
     let mut actions = Vec::new();
 
     for event in events.borrow_mut().drain(..) {
@@ -187,7 +212,7 @@ fn process_events(
         }
     }
 
-    apply_graph_actions(app, actions);
+    actions
 }
 
 /// Apply resolved graph actions to app state (testable without egui rendering).
