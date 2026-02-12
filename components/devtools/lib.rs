@@ -28,6 +28,9 @@ use devtools_traits::{
 };
 use embedder_traits::{AllowOrDeny, EmbedderMsg, EmbedderProxy};
 use log::{trace, warn};
+use malloc_size_of::MallocSizeOf;
+use malloc_size_of_derive::MallocSizeOf;
+use profile_traits::path;
 use rand::{RngCore, rng};
 use resource::{ResourceArrayType, ResourceAvailable};
 use rustc_hash::FxHashMap;
@@ -35,7 +38,7 @@ use serde::Serialize;
 
 use crate::actor::{Actor, ActorRegistry};
 use crate::actors::browsing_context::BrowsingContextActor;
-use crate::actors::console::{ConsoleActor, ConsoleResource, Root};
+use crate::actors::console::{ConsoleActor, ConsoleResource, DevtoolsConsoleMessage, Root};
 use crate::actors::framerate::FramerateActor;
 use crate::actors::network_event::NetworkEventActor;
 use crate::actors::root::RootActor;
@@ -80,8 +83,11 @@ mod id;
 mod network_handler;
 mod protocol;
 mod resource;
+use profile_traits::mem::{
+    ProcessReports, ProfilerChan, Report, ReportKind, perform_memory_report,
+};
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, MallocSizeOf)]
 enum UniqueId {
     Pipeline(PipelineId),
     Worker(WorkerId),
@@ -98,27 +104,48 @@ pub(crate) struct ActorMsg {
 }
 
 /// Spin up a devtools server that listens for connections on the specified port.
-pub fn start_server(port: u16, embedder: EmbedderProxy) -> Sender<DevtoolsControlMsg> {
+pub fn start_server(
+    port: u16,
+    embedder: EmbedderProxy,
+    mem_profiler_chan: ProfilerChan,
+) -> Sender<DevtoolsControlMsg> {
     let (sender, receiver) = unbounded();
     {
         let sender = sender.clone();
+        let sender2 = sender.clone();
         thread::Builder::new()
             .name("Devtools".to_owned())
             .spawn(move || {
-                if let Some(instance) = DevtoolsInstance::create(sender, receiver, port, embedder) {
-                    instance.run()
-                }
+                mem_profiler_chan.run_with_memory_reporting(
+                    || {
+                        if let Some(instance) =
+                            DevtoolsInstance::create(sender, receiver, port, embedder)
+                        {
+                            instance.run()
+                        }
+                    },
+                    String::from("devtools-reporter"),
+                    sender2,
+                    |chan| {
+                        DevtoolsControlMsg::FromChrome(
+                            ChromeToDevtoolsControlMsg::CollectMemoryReport(chan),
+                        )
+                    },
+                )
             })
             .expect("Thread spawning failed");
     }
     sender
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, MallocSizeOf)]
 pub(crate) struct StreamId(u32);
 
+#[derive(MallocSizeOf)]
 struct DevtoolsInstance {
+    #[conditional_malloc_size_of]
     registry: Arc<ActorRegistry>,
+    #[conditional_malloc_size_of]
     id_map: Arc<Mutex<IdMap>>,
     browsing_contexts: FxHashMap<BrowsingContextId, String>,
     receiver: Receiver<DevtoolsControlMsg>,
@@ -237,11 +264,15 @@ impl DevtoolsInstance {
                     pipeline_id,
                     console_message,
                     worker_id,
-                )) => self.handle_console_resource(
-                    pipeline_id,
-                    worker_id,
-                    ConsoleResource::ConsoleMessage(console_message.into()),
-                ),
+                )) => {
+                    let console_message =
+                        DevtoolsConsoleMessage::new(console_message, &self.registry);
+                    self.handle_console_resource(
+                        pipeline_id,
+                        worker_id,
+                        ConsoleResource::ConsoleMessage(console_message),
+                    );
+                },
                 DevtoolsControlMsg::FromScript(ScriptToDevtoolsControlMsg::ClearConsole(
                     pipeline_id,
                     worker_id,
@@ -277,11 +308,13 @@ impl DevtoolsInstance {
                         arguments: vec![css_error.msg.into()],
                         stacktrace: None,
                     };
+                    let console_message =
+                        DevtoolsConsoleMessage::new(console_message, &self.registry);
 
                     self.handle_console_resource(
                         pipeline_id,
                         None,
-                        ConsoleResource::ConsoleMessage(console_message.into()),
+                        ConsoleResource::ConsoleMessage(console_message),
                     )
                 },
                 DevtoolsControlMsg::FromChrome(ChromeToDevtoolsControlMsg::NetworkEvent(
@@ -297,6 +330,18 @@ impl DevtoolsInstance {
                     self.handle_network_event(connections, request_id, network_event);
                 },
                 DevtoolsControlMsg::FromChrome(ChromeToDevtoolsControlMsg::ServerExitMsg) => break,
+                DevtoolsControlMsg::FromChrome(
+                    ChromeToDevtoolsControlMsg::CollectMemoryReport(chan),
+                ) => {
+                    perform_memory_report(|ops| {
+                        let reports = vec![Report {
+                            path: path!["devtools"],
+                            kind: ReportKind::ExplicitSystemHeapSize,
+                            size: self.size_of(ops),
+                        }];
+                        chan.send(ProcessReports::new(reports));
+                    });
+                },
             }
         }
 

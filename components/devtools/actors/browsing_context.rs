@@ -10,13 +10,14 @@ use std::collections::HashMap;
 use std::net::TcpStream;
 
 use atomic_refcell::AtomicRefCell;
-use base::generic_channel::{self, GenericSender};
+use base::generic_channel::{self, GenericSender, SendError};
 use base::id::PipelineId;
 use devtools_traits::DevtoolScriptControlMsg::{
     self, GetCssDatabase, SimulateColorScheme, WantsLiveNotifications,
 };
 use devtools_traits::{DevtoolsPageInfo, NavigationState};
 use embedder_traits::Theme;
+use malloc_size_of_derive::MallocSizeOf;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -131,6 +132,7 @@ pub(crate) struct BrowsingContextActorMsg {
 /// The browsing context actor encompasses all of the other supporting actors when debugging a web
 /// view. To this extent, it contains a watcher actor that helps when communicating with the host,
 /// as well as resource actors that each perform one debugging function.
+#[derive(MallocSizeOf)]
 pub(crate) struct BrowsingContextActor {
     name: String,
     pub title: AtomicRefCell<String>,
@@ -194,10 +196,15 @@ impl Actor for BrowsingContextActor {
 
     fn cleanup(&self, id: StreamId) {
         self.streams.borrow_mut().remove(&id);
+
         if self.streams.borrow().is_empty() {
-            self.script_chan
-                .send(WantsLiveNotifications(self.pipeline_id(), false))
-                .unwrap();
+            let result = self
+                .script_chan
+                .send(WantsLiveNotifications(self.pipeline_id(), false));
+
+            // Notifying the script thread may fail with a "Disconnected" error if servo
+            // as a whole is being shut down.
+            debug_assert!(matches!(result, Ok(_) | Err(SendError::Disconnected)));
         }
     }
 }
