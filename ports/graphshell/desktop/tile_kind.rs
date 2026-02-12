@@ -6,7 +6,7 @@
 
 use crate::graph::NodeKey;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum TileKind {
     /// The spatial graph pane.
     Graph,

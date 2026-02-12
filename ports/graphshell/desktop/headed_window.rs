@@ -188,8 +188,10 @@ impl HeadedWindow {
             event_loop,
             event_loop_proxy,
             rendering_context.clone(),
+            window_rendering_context.clone(),
             initial_url,
             servoshell_preferences.graph_data_dir.clone(),
+            servoshell_preferences.graph_snapshot_interval_secs,
         ));
 
         debug!("Created window {:?}", winit_window.id());
@@ -296,9 +298,20 @@ impl HeadedWindow {
     }
 
     /// Helper function to handle mouse move events.
-    fn handle_mouse_move_event(&self, webview: &WebView, position: PhysicalPosition<f64>) {
-        let mut point = winit_position_to_euclid_point(position).to_f32();
-        point.y -= (self.toolbar_height() * self.hidpi_scale_factor()).0;
+    fn set_webview_relative_mouse_point(
+        &self,
+        point: Point2D<f32, DeviceIndependentPixel>,
+    ) {
+        let scale = self.hidpi_scale_factor().get();
+        self.webview_relative_mouse_point
+            .set(Point2D::new(point.x * scale, point.y * scale));
+    }
+
+    fn handle_mouse_move_event_with_webview_relative_point(
+        &self,
+        webview: &WebView,
+        point: Point2D<f32, DevicePixel>,
+    ) {
 
         let previous_point = self.webview_relative_mouse_point.get();
         self.webview_relative_mouse_point.set(point);
@@ -572,7 +585,7 @@ impl HeadedWindow {
             };
 
             self.last_mouse_position.set(Some(point));
-            self.gui.borrow().is_in_egui_toolbar_rect(point)
+            self.gui.borrow().webview_at_point(point).is_none()
         };
 
         // Handle the event
@@ -686,29 +699,73 @@ impl HeadedWindow {
                 }
             }
 
-            if let Some(webview) = window.active_webview() {
-                match event {
-                    WindowEvent::KeyboardInput { event, .. } => {
-                        self.handle_keyboard_input(state.clone(), &window, event)
-                    },
-                    WindowEvent::ModifiersChanged(modifiers) => {
-                        self.modifiers_state.set(modifiers.state())
-                    },
-                    WindowEvent::MouseInput { state, button, .. } => {
+            match event {
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if let Some(webview_id) = self.gui.borrow().focused_webview_id() {
+                        window.activate_webview(webview_id);
+                    }
+                    self.handle_keyboard_input(state.clone(), &window, event)
+                },
+                WindowEvent::ModifiersChanged(modifiers) => {
+                    self.modifiers_state.set(modifiers.state())
+                },
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let pointer_target = self
+                        .last_mouse_position
+                        .get()
+                        .and_then(|point| self.gui.borrow().webview_at_point(point));
+                    if let Some((webview_id, local_point)) = pointer_target
+                        && let Some(webview) = window.webview_by_id(webview_id)
+                    {
+                        window.activate_webview(webview_id);
+                        self.set_webview_relative_mouse_point(local_point);
                         self.handle_mouse_button_event(&webview, button, state);
-                    },
-                    WindowEvent::CursorMoved { position, .. } => {
-                        self.handle_mouse_move_event(&webview, position);
-                    },
-                    WindowEvent::CursorLeft { .. } => {
+                    }
+                },
+                WindowEvent::CursorMoved { position, .. } => {
+                    let point =
+                        winit_position_to_euclid_point(position).to_f32() / self.hidpi_scale_factor();
+                    self.last_mouse_position.set(Some(point));
+                    let pointer_target = self.gui.borrow().webview_at_point(point);
+                    if let Some((webview_id, local_point)) = pointer_target
+                        && let Some(webview) = window.webview_by_id(webview_id)
+                    {
+                        window.activate_webview(webview_id);
+                        self.set_webview_relative_mouse_point(local_point);
+                        self.handle_mouse_move_event_with_webview_relative_point(
+                            &webview,
+                            self.webview_relative_mouse_point.get(),
+                        );
+                    }
+                },
+                WindowEvent::CursorLeft { .. } => {
+                    let pointer_target = self
+                        .last_mouse_position
+                        .get()
+                        .and_then(|point| self.gui.borrow().webview_at_point(point));
+                    if let Some((webview_id, local_point)) = pointer_target
+                        && let Some(webview) = window.webview_by_id(webview_id)
+                    {
+                        window.activate_webview(webview_id);
+                        self.set_webview_relative_mouse_point(local_point);
                         let webview_rect: Rect<_, _> = webview.size().into();
                         if webview_rect.contains(self.webview_relative_mouse_point.get()) {
                             webview.notify_input_event(InputEvent::MouseLeftViewport(
                                 MouseLeftViewportEvent::default(),
                             ));
                         }
-                    },
-                    WindowEvent::MouseWheel { delta, .. } => {
+                    }
+                },
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let pointer_target = self
+                        .last_mouse_position
+                        .get()
+                        .and_then(|point| self.gui.borrow().webview_at_point(point));
+                    if let Some((webview_id, local_point)) = pointer_target
+                        && let Some(webview) = window.webview_by_id(webview_id)
+                    {
+                        window.activate_webview(webview_id);
+                        self.set_webview_relative_mouse_point(local_point);
                         let (delta_x, delta_y, mode) = match delta {
                             MouseScrollDelta::LineDelta(delta_x, delta_y) => (
                                 (delta_x * LINE_WIDTH) as f64,
@@ -720,7 +777,6 @@ impl HeadedWindow {
                             },
                         };
 
-                        // Create wheel event before snapping to the major axis of movement
                         let delta = WheelDelta {
                             x: delta_x,
                             y: delta_y,
@@ -732,61 +788,85 @@ impl HeadedWindow {
                             delta,
                             point.into(),
                         )));
-                    },
-                    WindowEvent::Touch(touch) => {
+                    }
+                },
+                WindowEvent::Touch(touch) => {
+                    if let Some(webview_id) = self.gui.borrow().focused_webview_id()
+                        && let Some(webview) = window.webview_by_id(webview_id)
+                    {
+                        window.activate_webview(webview_id);
                         webview.notify_input_event(InputEvent::Touch(TouchEvent::new(
                             winit_phase_to_touch_event_type(touch.phase),
                             TouchId(touch.id as i32),
                             DevicePoint::new(touch.location.x as f32, touch.location.y as f32)
                                 .into(),
                         )));
-                    },
-                    WindowEvent::PinchGesture { delta, .. } => {
+                    }
+                },
+                WindowEvent::PinchGesture { delta, .. } => {
+                    let pointer_target = self
+                        .last_mouse_position
+                        .get()
+                        .and_then(|point| self.gui.borrow().webview_at_point(point));
+                    if let Some((webview_id, local_point)) = pointer_target
+                        && let Some(webview) = window.webview_by_id(webview_id)
+                    {
+                        window.activate_webview(webview_id);
+                        self.set_webview_relative_mouse_point(local_point);
                         webview.pinch_zoom(
                             delta as f32 + 1.0,
                             self.webview_relative_mouse_point.get(),
                         );
-                    },
-                    WindowEvent::CloseRequested => {
-                        window.schedule_close();
-                    },
-                    WindowEvent::ThemeChanged(theme) => {
+                    }
+                },
+                WindowEvent::CloseRequested => {
+                    window.schedule_close();
+                },
+                WindowEvent::ThemeChanged(theme) => {
+                    if let Some(webview) = window.active_webview() {
                         webview.notify_theme_change(match theme {
                             winit::window::Theme::Light => Theme::Light,
                             winit::window::Theme::Dark => Theme::Dark,
                         });
-                    },
-                    WindowEvent::Ime(ime) => match ime {
-                        Ime::Enabled => {
-                            webview.notify_input_event(InputEvent::Ime(ImeEvent::Composition(
-                                servo::CompositionEvent {
-                                    state: servo::CompositionState::Start,
-                                    data: String::new(),
-                                },
-                            )));
-                        },
-                        Ime::Preedit(text, _) => {
-                            webview.notify_input_event(InputEvent::Ime(ImeEvent::Composition(
-                                servo::CompositionEvent {
-                                    state: servo::CompositionState::Update,
-                                    data: text,
-                                },
-                            )));
-                        },
-                        Ime::Commit(text) => {
-                            webview.notify_input_event(InputEvent::Ime(ImeEvent::Composition(
-                                servo::CompositionEvent {
-                                    state: servo::CompositionState::End,
-                                    data: text,
-                                },
-                            )));
-                        },
-                        Ime::Disabled => {
-                            webview.notify_input_event(InputEvent::Ime(ImeEvent::Dismissed));
-                        },
-                    },
-                    _ => {},
-                }
+                    }
+                },
+                WindowEvent::Ime(ime) => {
+                    if let Some(webview_id) = self.gui.borrow().focused_webview_id() {
+                        window.activate_webview(webview_id);
+                    }
+                    if let Some(webview) = window.active_webview() {
+                        match ime {
+                            Ime::Enabled => {
+                                webview.notify_input_event(InputEvent::Ime(ImeEvent::Composition(
+                                    servo::CompositionEvent {
+                                        state: servo::CompositionState::Start,
+                                        data: String::new(),
+                                    },
+                                )));
+                            },
+                            Ime::Preedit(text, _) => {
+                                webview.notify_input_event(InputEvent::Ime(ImeEvent::Composition(
+                                    servo::CompositionEvent {
+                                        state: servo::CompositionState::Update,
+                                        data: text,
+                                    },
+                                )));
+                            },
+                            Ime::Commit(text) => {
+                                webview.notify_input_event(InputEvent::Ime(ImeEvent::Composition(
+                                    servo::CompositionEvent {
+                                        state: servo::CompositionState::End,
+                                        data: text,
+                                    },
+                                )));
+                            },
+                            Ime::Disabled => {
+                                webview.notify_input_event(InputEvent::Ime(ImeEvent::Dismissed));
+                            },
+                        }
+                    }
+                },
+                _ => {},
             }
         }
     }

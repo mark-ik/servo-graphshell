@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 use types::{GraphSnapshot, LogEntry};
 
 const SNAPSHOT_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("snapshots");
+const TILE_LAYOUT_TABLE: redb::TableDefinition<&str, &[u8]> =
+    redb::TableDefinition::new("tile_layout");
+pub const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 300;
 
 /// Persistent graph store backed by fjall (log) + redb (snapshots)
 pub struct GraphStore {
@@ -60,7 +63,7 @@ impl GraphStore {
             snapshot_db,
             log_sequence,
             last_snapshot: Instant::now(),
-            snapshot_interval: Duration::from_secs(300), // 5 minutes
+            snapshot_interval: Duration::from_secs(DEFAULT_SNAPSHOT_INTERVAL_SECS),
         })
     }
 
@@ -148,6 +151,22 @@ impl GraphStore {
         }
     }
 
+    /// Configure periodic snapshot interval (seconds).
+    pub fn set_snapshot_interval_secs(&mut self, secs: u64) -> Result<(), GraphStoreError> {
+        if secs == 0 {
+            return Err(GraphStoreError::Io(
+                "Snapshot interval must be greater than zero seconds".to_string(),
+            ));
+        }
+        self.snapshot_interval = Duration::from_secs(secs);
+        Ok(())
+    }
+
+    /// Current periodic snapshot interval in seconds.
+    pub fn snapshot_interval_secs(&self) -> u64 {
+        self.snapshot_interval.as_secs()
+    }
+
     /// Clear all persisted graph data (snapshot + mutation log).
     pub fn clear_all(&mut self) -> Result<(), GraphStoreError> {
         let write_txn = self
@@ -161,6 +180,11 @@ impl GraphStore {
             table
                 .remove("latest")
                 .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+            if let Ok(mut tile_table) = write_txn.open_table(TILE_LAYOUT_TABLE) {
+                tile_table
+                    .remove("latest")
+                    .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+            }
         }
         write_txn
             .commit()
@@ -169,6 +193,34 @@ impl GraphStore {
         self.clear_log();
         self.last_snapshot = Instant::now();
         Ok(())
+    }
+
+    /// Persist serialized tile layout JSON.
+    pub fn save_tile_layout_json(&mut self, layout_json: &str) -> Result<(), GraphStoreError> {
+        let write_txn = self
+            .snapshot_db
+            .begin_write()
+            .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+        {
+            let mut table = write_txn
+                .open_table(TILE_LAYOUT_TABLE)
+                .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+            table
+                .insert("latest", layout_json.as_bytes())
+                .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+        Ok(())
+    }
+
+    /// Load serialized tile layout JSON if present.
+    pub fn load_tile_layout_json(&self) -> Option<String> {
+        let read_txn = self.snapshot_db.begin_read().ok()?;
+        let table = read_txn.open_table(TILE_LAYOUT_TABLE).ok()?;
+        let entry = table.get("latest").ok()??;
+        std::str::from_utf8(entry.value()).ok().map(|s| s.to_string())
     }
 
     fn load_snapshot(&self) -> Option<GraphSnapshot> {
@@ -590,5 +642,37 @@ mod tests {
             let store = GraphStore::open(path).unwrap();
             assert!(store.recover().is_none());
         }
+    }
+
+    #[test]
+    fn test_tile_layout_roundtrip() {
+        let (mut store, _dir) = create_test_store();
+        let layout = r#"{"root":null,"tiles":{}}"#;
+        store.save_tile_layout_json(layout).unwrap();
+        let loaded = store.load_tile_layout_json().unwrap();
+        assert_eq!(loaded, layout);
+    }
+
+    #[test]
+    fn test_clear_all_removes_tile_layout() {
+        let (mut store, _dir) = create_test_store();
+        store.save_tile_layout_json(r#"{"root":null,"tiles":{}}"#).unwrap();
+        assert!(store.load_tile_layout_json().is_some());
+        store.clear_all().unwrap();
+        assert!(store.load_tile_layout_json().is_none());
+    }
+
+    #[test]
+    fn test_set_snapshot_interval_secs() {
+        let (mut store, _dir) = create_test_store();
+        store.set_snapshot_interval_secs(42).unwrap();
+        assert_eq!(store.snapshot_interval_secs(), 42);
+    }
+
+    #[test]
+    fn test_set_snapshot_interval_secs_rejects_zero() {
+        let (mut store, _dir) = create_test_store();
+        assert!(store.set_snapshot_interval_secs(0).is_err());
+        assert_eq!(store.snapshot_interval_secs(), DEFAULT_SNAPSHOT_INTERVAL_SECS);
     }
 }

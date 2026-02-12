@@ -1,7 +1,7 @@
 # Graphshell Design Documentation Index
 
-**Last Updated**: February 11, 2026
-**Status**: Core browsing graph functional (~7,000 LOC) — Phase 1 refinement complete
+**Last Updated**: February 12, 2026
+**Status**: Core browsing graph functional with egui_tiles runtime complete; physics/selection simplification is next
 
 ---
 
@@ -33,8 +33,8 @@
 
 5. **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** (30 min)
    - Feature-driven plan (11 feature targets)
-   - 4 of 5 Phase 1 targets complete (Servo, persistence, zoom, camera)
-   - Remaining: thumbnails & favicons
+   - egui_tiles migration complete
+   - Next block: physics/selection simplification, then FT2 thumbnails
    - Validation tests and success criteria for each target
 
 ### Phase 1: Detailed Specs
@@ -88,6 +88,7 @@
 | **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** | Feature targets, validation criteria, tech stack | Before implementing features |
 | **[implementation_strategy/2026-02-11_phase1_refinement_plan.md](implementation_strategy/2026-02-11_phase1_refinement_plan.md)** | **Active:** Phase 1 refinement (11 steps) | Current work reference |
 | **[implementation_strategy/2026-02-12_persistence_ux_plan.md](implementation_strategy/2026-02-12_persistence_ux_plan.md)** | Persistence reset UX plan | Reference (completed) |
+| **[implementation_strategy/2026-02-12_physics_selection_plan.md](implementation_strategy/2026-02-12_physics_selection_plan.md)** | Physics migration + selection consolidation plan | Current work reference |
 
 **Architecture Plans**
 
@@ -127,9 +128,9 @@
 ## Status Snapshot
 
 - **Core browsing graph functional** (~7,000 LOC total, ~1,300 core graph+physics). Details in [ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md).
-- **Phase 1 progress**: 4/5 feature targets complete (thumbnails & favicons pending). Refinement complete.
+- **Phase 1 progress**: egui_tiles migration complete; favicon vertical slice complete; thumbnail pipeline still pending.
 - **Refinement**: 11/11 steps complete. See [phase1_refinement_plan.md](implementation_strategy/2026-02-11_phase1_refinement_plan.md).
-- **Tests**: 137 passing
+- **Tests**: 155 passing
 - **Tech stack**: petgraph + egui_graphs + kiddo + fjall + redb + rkyv. Details in [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md).
 
 ---

@@ -4,6 +4,7 @@
 - Goal: Show recognizable node visuals using thumbnail > favicon > color fallback.
 - Scope: Graphshell node rendering and data pipeline only; no external sync.
 - Dependencies: Servo capture hook, egui textures, persistence updates.
+- Ordering dependency: complete physics migration + selection consolidation first so FT2 lands on the stabilized render/state model.
 - Phase 1: Data model
   - Add optional `thumbnail` and `favicon` handles to the node model.
   - Add metadata for source URL and last update timestamp.
@@ -32,6 +33,8 @@
 - The missing path was graph-node integration and persistence.
 - `egui_graphs` supports custom node drawing via `DisplayNode`; this allows favicon rendering in graph view without changing graph interaction handling.
 - Snapshot persistence is the right first persistence step for favicon bytes (log entries are not required for this slice).
+- `image` crate is already available in graphshell dependencies, so resize/encode work for thumbnail bytes does not require dependency changes.
+- FT2 should target the stabilized physics/selection architecture to avoid rebasing thumbnail node rendering onto changing state contracts.
 
 ## Progress
 - 2026-02-11: Plan created.
@@ -41,3 +44,6 @@
   - Added custom graph node shape that renders favicon textures when available (falls back to colored circle).
   - Wired favicon ingestion to persist bytes on mapped graph nodes from pending favicon loads.
   - Added tests for favicon snapshot/schema roundtrip.
+- 2026-02-12: Sequencing updated:
+  - Physics migration and selection consolidation are the immediate predecessor tasks.
+  - Next FT2 slice starts with thumbnail byte pipeline (`capture -> resize -> persist -> render`).

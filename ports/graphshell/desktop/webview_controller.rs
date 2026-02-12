@@ -14,29 +14,30 @@ use std::rc::Rc;
 use servo::WebViewId;
 use url::Url;
 
-use crate::app::{GraphBrowserApp, View};
+use crate::app::GraphBrowserApp;
 use crate::graph::{EdgeType, NodeKey};
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
 
+pub(crate) struct SyncToGraphResult {
+    pub remapped_nodes: Vec<(NodeKey, NodeKey)>,
+}
+
 /// Manage webview lifecycle based on current view.
 ///
-/// - **Graph view**: Save which nodes have webviews (for later restoration),
-///   then destroy all webviews to prevent framebuffer bleed-through unless
-///   `preserve_webviews_in_graph` is true (egui_tiles migration path).
-/// - **Detail view**: Recreate webviews for all previously saved nodes,
-///   activating the focused node's webview.
+/// - **Graph-only mode** (`has_webview_tiles == false`): save which nodes have
+///   webviews (for later restoration), then destroy all webviews to prevent
+///   framebuffer bleed-through.
+/// - **Tile-detail mode** (`has_webview_tiles == true`): recreate/ensure webviews
+///   and activate the currently active webview tile node, if provided.
 pub(crate) fn manage_lifecycle(
     app: &mut GraphBrowserApp,
     window: &ServoShellWindow,
     state: &Option<Rc<RunningAppState>>,
-    preserve_webviews_in_graph: bool,
+    has_webview_tiles: bool,
+    active_webview_node: Option<NodeKey>,
 ) {
-    if matches!(app.view, View::Graph) {
-        if preserve_webviews_in_graph {
-            return;
-        }
-
+    if !has_webview_tiles {
         // Only save once when entering graph view (webviews exist but list empty)
         if app.active_webview_nodes.is_empty() && window.webviews().into_iter().next().is_some() {
             // Save node keys before destroying webviews
@@ -59,7 +60,7 @@ pub(crate) fn manage_lifecycle(
                 }
             }
         }
-    } else if let View::Detail(active_node) = app.view {
+    } else if let Some(active_node) = active_webview_node {
         if !app.active_webview_nodes.is_empty() {
             // Recreate webviews for all nodes that had them before
             let nodes_to_restore: Vec<NodeKey> = app.active_webview_nodes.clone();
@@ -118,8 +119,9 @@ pub(crate) fn sync_to_graph(
     app: &mut GraphBrowserApp,
     previous_urls: &mut HashMap<WebViewId, Url>,
     window: &ServoShellWindow,
-) {
+) -> SyncToGraphResult {
     use euclid::default::Point2D;
+    let mut remapped_nodes = Vec::new();
 
     // Collect all webviews and their current URLs
     let webviews: Vec<(WebViewId, Option<Url>, Option<String>)> = window
@@ -169,6 +171,7 @@ pub(crate) fn sync_to_graph(
                     let to_key = app.add_node_and_sync(url.to_string(), new_pos);
 
                     app.map_webview_to_node(wv_id, to_key);
+                    remapped_nodes.push((from_key, to_key));
 
                     if let Some(title) = title_opt.as_ref() {
                         if let Some(node) = app.graph.get_node_mut(to_key) {
@@ -243,13 +246,15 @@ pub(crate) fn sync_to_graph(
         app.unmap_webview(wv_id);
         previous_urls.remove(&wv_id);
     }
+
+    SyncToGraphResult { remapped_nodes }
 }
 
 /// Handle address bar submission (Enter key).
 ///
 /// - **Graph view**: Update selected node's URL (persisted + `url_to_node`
 ///   updated), pre-seed `previous_urls` to prevent phantom-node creation,
-///   then switch to detail view.
+///   then select/open the node in tile-driven detail mode.
 /// - **Detail view**: Queue a navigation command.
 ///
 /// Returns `true` if the location field should be marked as clean
@@ -274,16 +279,16 @@ pub(crate) fn handle_address_bar_submit(
                 }
             }
 
-            // Switch to detail view — webview lifecycle will create the
-            // webview and load the URL on next frame
-            app.focus_node(selected_node);
+            // Keep graph selection in sync; GUI tile flow decides whether to
+            // open/focus a WebView tile.
+            app.select_node(selected_node, false);
         } else {
             // No node selected — create a new node with the URL
             let key = app.add_node_and_sync(
                 url.to_string(),
                 euclid::default::Point2D::new(400.0, 300.0),
             );
-            app.focus_node(key);
+            app.select_node(key, false);
         }
         true
     } else {

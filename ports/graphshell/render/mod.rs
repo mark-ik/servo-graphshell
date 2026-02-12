@@ -7,7 +7,7 @@
 //! Delegates graph visualization and interaction to the egui_graphs crate,
 //! which provides built-in navigation (zoom/pan), node dragging, and selection.
 
-use crate::app::{GraphBrowserApp, View};
+use crate::app::GraphBrowserApp;
 use crate::graph::egui_adapter::{EguiGraphState, GraphNodeShape};
 use crate::graph::NodeKey;
 use crate::physics::PhysicsConfig;
@@ -220,7 +220,7 @@ pub fn apply_graph_actions(app: &mut GraphBrowserApp, actions: Vec<GraphAction>)
     for action in actions {
         match action {
             GraphAction::FocusNode(key) => {
-                app.focus_node(key);
+                app.select_node(key, false);
             },
             GraphAction::DragStart => {
                 app.set_interacting(true);
@@ -249,7 +249,7 @@ pub fn apply_graph_actions(app: &mut GraphBrowserApp, actions: Vec<GraphAction>)
 /// Draw graph information overlay
 fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
     let info_text = format!(
-        "Nodes: {} | Edges: {} | Physics: {} | Zoom: {:.1}x | View: {}",
+        "Nodes: {} | Edges: {} | Physics: {} | Zoom: {:.1}x",
         app.graph.node_count(),
         app.graph.edge_count(),
         if app.physics.is_running {
@@ -257,11 +257,7 @@ fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
         } else {
             "Paused"
         },
-        app.camera.current_zoom,
-        match app.view {
-            View::Graph => "Graph",
-            View::Detail(_) => "Detail",
-        }
+        app.camera.current_zoom
     );
 
     ui.painter().text(
@@ -274,7 +270,7 @@ fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
 
     // Draw controls hint
     let controls_text =
-        "Double-click: Focus | N: New Node | Del: Remove | T: Physics | C: Fit | Home/Esc: Toggle View | F1/?: Help";
+        "Double-click: Select/Open | N: New Node | Del: Remove | T: Physics | C: Fit | Home/Esc: Toggle View | F1/?: Help";
     ui.painter().text(
         ui.available_rect_before_wrap().left_bottom() + Vec2::new(10.0, -10.0),
         egui::Align2::LEFT_BOTTOM,
@@ -470,11 +466,11 @@ mod tests {
     fn test_focus_node_action() {
         let mut app = test_app();
         let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
-        assert!(matches!(app.view, View::Graph));
 
         apply_graph_actions(&mut app, vec![GraphAction::FocusNode(key)]);
 
-        assert!(matches!(app.view, View::Detail(k) if k == key));
+        assert!(app.selected_nodes.contains(&key));
+        assert!(app.graph.get_node(key).unwrap().is_selected);
     }
 
     #[test]

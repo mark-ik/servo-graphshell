@@ -121,7 +121,7 @@ egui-file-dialog = "0.12.0"
 egui-winit = { version = "0.33.3", default-features = false, features = ["accesskit", "clipboard", "wayland"] }
 egui_glow = { version = "0.33.3", features = ["winit"] }
 egui_graphs = { version = "0.29.0", features = ["events"] }
-egui_tiles = "0.14.1"
+egui_tiles = { version = "0.14.1", features = ["serde"] }
 petgraph = { version = "0.8.3", features = ["serde-1"] }
 kiddo = "4.2"
 fjall = "3"

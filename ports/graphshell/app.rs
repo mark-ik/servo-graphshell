@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-//! Application state and view management for the graph browser.
+//! Application state management for the graph browser.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,16 +44,6 @@ impl Default for Camera {
     }
 }
 
-/// Main application view state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
-    /// Graph view (force-directed layout)
-    Graph,
-
-    /// Detail view focused on a specific node
-    Detail(NodeKey),
-}
-
 /// Main application state
 pub struct GraphBrowserApp {
     /// The graph data structure
@@ -64,9 +54,6 @@ pub struct GraphBrowserApp {
 
     /// Physics worker thread
     physics_worker: Option<PhysicsWorker>,
-
-    /// Current view
-    pub view: View,
 
     /// Currently selected nodes (can be multiple)
     pub selected_nodes: Vec<NodeKey>,
@@ -142,7 +129,6 @@ impl GraphBrowserApp {
             graph,
             physics,
             physics_worker,
-            view: View::Graph,
             selected_nodes: Vec::new(),
             webview_to_node: HashMap::new(),
             node_to_webview: HashMap::new(),
@@ -170,7 +156,6 @@ impl GraphBrowserApp {
             graph: Graph::new(),
             physics,
             physics_worker: None,
-            view: View::Graph,
             selected_nodes: Vec::new(),
             webview_to_node: HashMap::new(),
             node_to_webview: HashMap::new(),
@@ -190,23 +175,6 @@ impl GraphBrowserApp {
     /// Whether the graph was recovered from persistence (has nodes on startup)
     pub fn has_recovered_graph(&self) -> bool {
         self.graph.node_count() > 0
-    }
-
-    /// Toggle between graph and detail view
-    pub fn toggle_view(&mut self) {
-        self.view = match self.view {
-            View::Graph => {
-                // Switch to detail view of first selected node (or first node if none selected)
-                if let Some(&key) = self.selected_nodes.first() {
-                    View::Detail(key)
-                } else if let Some((key, _)) = self.graph.nodes().next() {
-                    View::Detail(key)
-                } else {
-                    View::Graph
-                }
-            },
-            View::Detail(_) => View::Graph,
-        };
     }
 
     /// Select a node
@@ -231,12 +199,6 @@ impl GraphBrowserApp {
         if let Some(node) = self.graph.get_node_mut(key) {
             node.is_selected = true;
         }
-    }
-
-    /// Focus on a node (switch to detail view)
-    pub fn focus_node(&mut self, key: NodeKey) {
-        self.view = View::Detail(key);
-        self.select_node(key, false);
     }
 
     /// Request fit-to-screen on next render frame (one-shot)
@@ -391,11 +353,64 @@ impl GraphBrowserApp {
         }
     }
 
+    /// Configure periodic persistence snapshot interval in seconds.
+    pub fn set_snapshot_interval_secs(&mut self, secs: u64) -> Result<(), String> {
+        let store = self
+            .persistence
+            .as_mut()
+            .ok_or_else(|| "Persistence is not available".to_string())?;
+        store
+            .set_snapshot_interval_secs(secs)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Current periodic persistence snapshot interval in seconds, if persistence is enabled.
+    pub fn snapshot_interval_secs(&self) -> Option<u64> {
+        self.persistence
+            .as_ref()
+            .map(|store| store.snapshot_interval_secs())
+    }
+
     /// Take an immediate snapshot (e.g., on shutdown)
     pub fn take_snapshot(&mut self) {
         if let Some(store) = &mut self.persistence {
             store.take_snapshot(&self.graph);
         }
+    }
+
+    /// Persist serialized tile layout JSON.
+    pub fn save_tile_layout_json(&mut self, layout_json: &str) {
+        if let Some(store) = &mut self.persistence
+            && let Err(e) = store.save_tile_layout_json(layout_json)
+        {
+            warn!("Failed to save tile layout: {e}");
+        }
+    }
+
+    /// Load serialized tile layout JSON from persistence.
+    pub fn load_tile_layout_json(&self) -> Option<String> {
+        self.persistence
+            .as_ref()
+            .and_then(|store| store.load_tile_layout_json())
+    }
+
+    /// Switch persistence backing store at runtime and reload graph state from it.
+    pub fn switch_persistence_dir(&mut self, data_dir: PathBuf) -> Result<(), String> {
+        let store = GraphStore::open(data_dir).map_err(|e| e.to_string())?;
+        let graph = store.recover().unwrap_or_else(Graph::new);
+        let next_placeholder_id = Self::scan_max_placeholder_id(&graph);
+
+        self.graph = graph;
+        self.persistence = Some(store);
+        self.selected_nodes.clear();
+        self.webview_to_node.clear();
+        self.node_to_webview.clear();
+        self.active_webview_nodes.clear();
+        self.next_placeholder_id = next_placeholder_id;
+        self.egui_state = None;
+        self.egui_state_dirty = true;
+        self.sync_graph_to_worker();
+        Ok(())
     }
 
     /// Add a bidirectional mapping between a webview and a node
@@ -578,7 +593,7 @@ impl GraphBrowserApp {
         }
     }
 
-    /// Clear the entire graph, all webview mappings, and reset to graph view.
+    /// Clear the entire graph and all webview mappings.
     /// Webview closure must be handled by the caller (gui.rs) since we don't
     /// hold a reference to the window.
     pub fn clear_graph(&mut self) {
@@ -589,7 +604,6 @@ impl GraphBrowserApp {
         self.selected_nodes.clear();
         self.webview_to_node.clear();
         self.node_to_webview.clear();
-        self.view = View::Graph;
         self.egui_state_dirty = true;
         self.sync_graph_to_worker();
     }
@@ -607,7 +621,6 @@ impl GraphBrowserApp {
         self.node_to_webview.clear();
         self.active_webview_nodes.clear();
         self.next_placeholder_id = 0;
-        self.view = View::Graph;
         self.egui_state_dirty = true;
         self.sync_graph_to_worker();
     }
@@ -655,76 +668,17 @@ mod tests {
     }
 
     #[test]
-    fn test_focus_node_switches_to_detail_view() {
+    fn test_select_node_marks_selection_state() {
         let mut app = GraphBrowserApp::new_for_testing();
         let node_key = app
             .graph
             .add_node("test".to_string(), Point2D::new(100.0, 100.0));
 
-        // Initially in graph view
-        assert!(matches!(app.view, View::Graph));
-
-        // Focus on node should switch to detail view
-        app.focus_node(node_key);
-        assert!(matches!(app.view, View::Detail(key) if key == node_key));
+        app.select_node(node_key, false);
 
         // Node should be selected
         assert!(app.selected_nodes.contains(&node_key));
-    }
-
-    #[test]
-    fn test_toggle_view_from_graph_to_detail() {
-        let mut app = GraphBrowserApp::new_for_testing();
-        let node_key = app
-            .graph
-            .add_node("test".to_string(), Point2D::new(100.0, 100.0));
-
-        // Select a node
-        app.select_node(node_key, false);
-
-        // Toggle view should switch to detail view of selected node
-        app.toggle_view();
-        assert!(matches!(app.view, View::Detail(key) if key == node_key));
-    }
-
-    #[test]
-    fn test_toggle_view_from_detail_to_graph() {
-        let mut app = GraphBrowserApp::new_for_testing();
-        let node_key = app
-            .graph
-            .add_node("test".to_string(), Point2D::new(100.0, 100.0));
-
-        // Switch to detail view
-        app.focus_node(node_key);
-        assert!(matches!(app.view, View::Detail(_)));
-
-        // Toggle view should switch back to graph view
-        app.toggle_view();
-        assert!(matches!(app.view, View::Graph));
-    }
-
-    #[test]
-    fn test_toggle_view_no_nodes() {
-        let mut app = GraphBrowserApp::new_for_testing();
-
-        // Toggle view with no nodes should stay in graph view
-        app.toggle_view();
-        assert!(matches!(app.view, View::Graph));
-    }
-
-    #[test]
-    fn test_toggle_view_no_selection() {
-        let mut app = GraphBrowserApp::new_for_testing();
-        let node1 = app
-            .graph
-            .add_node("node1".to_string(), Point2D::new(100.0, 100.0));
-        let _node2 = app
-            .graph
-            .add_node("node2".to_string(), Point2D::new(200.0, 200.0));
-
-        // Toggle view without selection should focus on first node
-        app.toggle_view();
-        assert!(matches!(app.view, View::Detail(key) if key == node1));
+        assert!(app.graph.get_node(node_key).unwrap().is_selected);
     }
 
     #[test]
@@ -929,7 +883,7 @@ mod tests {
         let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
 
         app.select_node(k1, false);
-        app.focus_node(k2); // switches to Detail view
+        app.select_node(k2, false);
 
         let fake_wv_id = test_webview_id();
         app.map_webview_to_node(fake_wv_id, k1);
@@ -939,7 +893,6 @@ mod tests {
         assert_eq!(app.graph.node_count(), 0);
         assert!(app.selected_nodes.is_empty());
         assert!(app.get_node_for_webview(fake_wv_id).is_none());
-        assert!(matches!(app.view, View::Graph));
     }
 
     // --- TEST-1: create_new_node_near_center ---
@@ -1172,13 +1125,11 @@ mod tests {
             .graph
             .add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
         app.select_node(key, false);
-        app.focus_node(key);
 
         app.clear_graph_and_persistence();
 
         assert_eq!(app.graph.node_count(), 0);
         assert!(app.selected_nodes.is_empty());
-        assert!(matches!(app.view, View::Graph));
     }
 
     #[test]
@@ -1196,5 +1147,65 @@ mod tests {
         let recovered = GraphBrowserApp::new_from_dir(path);
         assert!(!recovered.has_recovered_graph());
         assert_eq!(recovered.graph.node_count(), 0);
+    }
+
+    #[test]
+    fn test_switch_persistence_dir_reloads_graph_state() {
+        let dir_a = TempDir::new().unwrap();
+        let path_a = dir_a.path().to_path_buf();
+        let dir_b = TempDir::new().unwrap();
+        let path_b = dir_b.path().to_path_buf();
+
+        {
+            let mut store_a = GraphStore::open(path_a.clone()).unwrap();
+            store_a.log_mutation(&LogEntry::AddNode {
+                url: "https://from-a.com".to_string(),
+                position_x: 1.0,
+                position_y: 2.0,
+            });
+        }
+        {
+            let mut store_b = GraphStore::open(path_b.clone()).unwrap();
+            store_b.log_mutation(&LogEntry::AddNode {
+                url: "https://from-b.com".to_string(),
+                position_x: 3.0,
+                position_y: 4.0,
+            });
+            store_b.log_mutation(&LogEntry::AddNode {
+                url: "about:blank#7".to_string(),
+                position_x: 5.0,
+                position_y: 6.0,
+            });
+        }
+
+        let mut app = GraphBrowserApp::new_from_dir(path_a);
+        assert!(app.graph.get_node_by_url("https://from-a.com").is_some());
+        assert!(app.graph.get_node_by_url("https://from-b.com").is_none());
+
+        app.switch_persistence_dir(path_b).unwrap();
+
+        assert!(app.graph.get_node_by_url("https://from-a.com").is_none());
+        assert!(app.graph.get_node_by_url("https://from-b.com").is_some());
+        assert!(app.selected_nodes.is_empty());
+
+        let new_placeholder = app.create_new_node_near_center();
+        assert_eq!(app.graph.get_node(new_placeholder).unwrap().url, "about:blank#8");
+    }
+
+    #[test]
+    fn test_set_snapshot_interval_secs_updates_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let mut app = GraphBrowserApp::new_from_dir(path);
+
+        app.set_snapshot_interval_secs(45).unwrap();
+        assert_eq!(app.snapshot_interval_secs(), Some(45));
+    }
+
+    #[test]
+    fn test_set_snapshot_interval_secs_without_persistence_fails() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        assert!(app.set_snapshot_interval_secs(45).is_err());
+        assert_eq!(app.snapshot_interval_secs(), None);
     }
 }

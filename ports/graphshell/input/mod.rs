@@ -96,9 +96,7 @@ pub fn apply_actions(app: &mut GraphBrowserApp, actions: &KeyboardActions) {
     if actions.toggle_physics {
         app.toggle_physics();
     }
-    if actions.toggle_view {
-        app.toggle_view();
-    }
+    // View toggling is handled by GUI tile logic (egui_tiles migration path).
     if actions.fit_to_screen {
         app.request_fit_to_screen();
     }
@@ -128,18 +126,20 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_view_action() {
+    fn test_toggle_view_action_is_gui_owned() {
         let mut app = test_app();
         use euclid::default::Point2D;
         app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
-        assert!(matches!(app.view, crate::app::View::Graph));
+        let selected_before = app.selected_nodes.clone();
+        let count_before = app.graph.node_count();
 
         apply_actions(&mut app, &KeyboardActions {
             toggle_view: true,
             ..Default::default()
         });
 
-        assert!(matches!(app.view, crate::app::View::Detail(_)));
+        assert_eq!(app.selected_nodes, selected_before);
+        assert_eq!(app.graph.node_count(), count_before);
     }
 
     #[test]

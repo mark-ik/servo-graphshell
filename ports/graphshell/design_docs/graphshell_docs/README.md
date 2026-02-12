@@ -29,7 +29,7 @@ Graphshell is a spatial browser built on Servo's engine. Webpages are nodes in a
 
 **Vision**: Enable serendipitous discovery, preserve browsing context, reduce tab chaos.
 
-**Current Status**: Core browsing graph functional (~4,500 LOC). Servo integration, persistence, zoom/camera, physics all working. Thumbnails remaining for Phase 1 completion.
+**Current Status**: Core browsing graph functional with egui_tiles multi-pane runtime complete. Immediate next work is physics/selection simplification, then FT2 thumbnail completion.
 
 ---
 
@@ -63,22 +63,22 @@ Graphshell is a spatial browser built on Servo's engine. Webpages are nodes in a
 
 ## Implementation Status
 
-**Last Updated**: February 11, 2026
-**Codebase**: `ports/graphshell/` (~4,500 LOC in core modules)
+**Last Updated**: February 12, 2026
+**Codebase**: `ports/graphshell/` (active desktop + graph runtime)
 
 ### What Works
 
 - **Real browsing**: Servo webviews integrated, navigation creates nodes + edges
 - **Graph visualization**: egui_graphs GraphView with zoom/pan/drag/selection
-- **Physics**: Force-directed layout with kiddo KD-tree, background worker thread
+- **Physics**: Custom force-directed path currently active; migration plan targets egui_graphs force-directed integration next
 - **Persistence**: fjall log + redb snapshots + rkyv serialization, survives restarts
 - **Keyboard shortcuts**: T (physics), C (fit), P (config panel), N (new node), Home/Esc (view toggle), Del (remove)
 
 ### What's Next
 
-- **Thumbnails & favicons**: Nodes are colored circles — page previews would aid spatial memory
-- **Search/filtering**: nucleo fuzzy search (Phase 2)
-- **Split view**: egui_tiles for graph + detail simultaneously (Phase 2)
+- **Physics + selection simplification**: Replace custom physics/worker path and consolidate duplicated selection state. See [physics selection plan](implementation_strategy/2026-02-12_physics_selection_plan.md).
+- **FT2 thumbnail completion**: Favicon vertical slice is done; thumbnail capture/persistence/render fallback remains. See [thumbnails and favicons plan](implementation_strategy/2026-02-11_thumbnails_favicons_plan.md).
+- **Search/filtering (FT6)**: nucleo fuzzy search integration after FT2.
 
 **See [ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md) for full details.**
 
@@ -93,8 +93,8 @@ Graphshell is a spatial browser built on Servo's engine. Webpages are nodes in a
 | UI Framework | egui 0.33.3 | Immediate mode, integrated with Servo |
 | Graph Storage | petgraph 0.8 (StableGraph) | Stable indices, algorithm ecosystem |
 | Graph Visualization | egui_graphs 0.29 | GraphView widget, events, zoom/pan |
-| Physics | Custom + kiddo 4.2 KD-tree | O(n) with spatial queries, springs + repulsion |
-| Worker Thread | crossbeam_channel | Non-blocking physics, 60fps target |
+| Physics | Custom (current) -> egui_graphs FR (planned) | See physics selection plan |
+| Worker Thread | crossbeam_channel | Used by current custom physics path; planned for removal |
 | Persistence | fjall 3 + redb 3 + rkyv 0.8 | Append log + snapshots + zero-copy serialization |
 | Geometry | euclid | 2D math (Point2D, Vector2D) |
 

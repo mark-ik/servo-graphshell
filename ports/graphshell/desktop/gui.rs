@@ -21,7 +21,7 @@ use euclid::{Length, Point2D, Rect, Scale, Size2D};
 use log::warn;
 use servo::{
     DeviceIndependentPixel, DevicePixel, Image, LoadStatus, OffscreenRenderingContext, PixelFormat,
-    RenderingContext, WebView, WebViewId,
+    RenderingContext, WebView, WebViewId, WindowRenderingContext,
 };
 use url::Url;
 use winit::event::WindowEvent;
@@ -36,6 +36,7 @@ use super::tile_kind::TileKind;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
 use crate::app::GraphBrowserApp;
+use crate::graph::NodeKey;
 use crate::input;
 use crate::render;
 
@@ -43,6 +44,7 @@ use crate::render;
 /// egui.
 pub struct Gui {
     rendering_context: Rc<OffscreenRenderingContext>,
+    window_rendering_context: Rc<WindowRenderingContext>,
     context: EguiGlow,
     /// Tile tree scaffold for upcoming egui_tiles layout migration.
     tiles_tree: Tree<TileKind>,
@@ -58,6 +60,24 @@ pub struct Gui {
 
     /// Whether to show the "clear saved graph data" confirmation dialog.
     show_clear_data_confirm: bool,
+
+    /// Whether to show runtime persistence directory switch dialog.
+    show_data_dir_dialog: bool,
+
+    /// Current editable persistence directory path.
+    data_dir_input: String,
+
+    /// Last status message for persistence directory switching.
+    data_dir_status: Option<String>,
+
+    /// Whether to show persistence settings dialog.
+    show_persistence_settings_dialog: bool,
+
+    /// Snapshot interval input value (seconds).
+    snapshot_interval_input: String,
+
+    /// Last status message for persistence settings updates.
+    persistence_settings_status: Option<String>,
 
     /// The [`LoadStatus`] of the active `WebView`.
     load_status: LoadStatus,
@@ -85,6 +105,12 @@ pub struct Gui {
     /// Track previous URL for each webview to create edges on navigation
     webview_previous_url: HashMap<WebViewId, Url>,
 
+    /// Per-node offscreen rendering contexts for WebView tiles.
+    tile_rendering_contexts: HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
+
+    /// Per-node favicon textures for egui_tiles tab rendering.
+    tile_favicon_textures: HashMap<NodeKey, (u64, egui::TextureHandle)>,
+
     /// Cached reference to RunningAppState for webview creation
     state: Option<Rc<RunningAppState>>,
 }
@@ -93,6 +119,11 @@ use crate::util::truncate_with_ellipsis;
 
 impl Drop for Gui {
     fn drop(&mut self) {
+        if let Ok(layout_json) = serde_json::to_string(&self.tiles_tree) {
+            self.graph_app.save_tile_layout_json(&layout_json);
+        } else {
+            warn!("Failed to serialize tile layout for persistence");
+        }
         self.graph_app.take_snapshot();
         self.rendering_context
             .make_current()
@@ -107,8 +138,10 @@ impl Gui {
         event_loop: &ActiveEventLoop,
         event_loop_proxy: EventLoopProxy<AppEvent>,
         rendering_context: Rc<OffscreenRenderingContext>,
+        window_rendering_context: Rc<WindowRenderingContext>,
         initial_url: Url,
         graph_data_dir: Option<PathBuf>,
+        graph_snapshot_interval_secs: Option<u64>,
     ) -> Self {
         rendering_context
             .make_current()
@@ -136,14 +169,25 @@ impl Gui {
             options.fallback_theme = egui::Theme::Light;
         });
 
-        let mut graph_app = match graph_data_dir {
-            Some(data_dir) => GraphBrowserApp::new_from_dir(data_dir),
-            None => GraphBrowserApp::new(),
-        };
-
+        let initial_data_dir = graph_data_dir.unwrap_or_else(crate::persistence::GraphStore::default_data_dir);
+        let mut graph_app = GraphBrowserApp::new_from_dir(initial_data_dir.clone());
+        if let Some(snapshot_secs) = graph_snapshot_interval_secs
+            && let Err(e) = graph_app.set_snapshot_interval_secs(snapshot_secs)
+        {
+            warn!("Failed to apply snapshot interval from startup preferences: {e}");
+        }
         let mut tiles = Tiles::default();
         let graph_tile_id = tiles.insert_pane(TileKind::Graph);
-        let tiles_tree = Tree::new("graphshell_tiles", graph_tile_id, tiles);
+        let mut tiles_tree = Tree::new("graphshell_tiles", graph_tile_id, tiles);
+
+        if let Some(layout_json) = graph_app.load_tile_layout_json()
+            && let Ok(mut restored_tree) = serde_json::from_str::<Tree<TileKind>>(&layout_json)
+        {
+            Self::prune_stale_webview_tile_keys_only(&mut restored_tree, &graph_app);
+            if restored_tree.root().is_some() {
+                tiles_tree = restored_tree;
+            }
+        }
 
         // Only create initial node if graph wasn't recovered from persistence
         if !graph_app.has_recovered_graph() {
@@ -156,6 +200,7 @@ impl Gui {
 
         Self {
             rendering_context,
+            window_rendering_context,
             context,
             tiles_tree,
             toolbar_height: Default::default(),
@@ -163,6 +208,15 @@ impl Gui {
             location_dirty: false,
             location_submitted: false,
             show_clear_data_confirm: false,
+            show_data_dir_dialog: false,
+            data_dir_input: initial_data_dir.display().to_string(),
+            data_dir_status: None,
+            show_persistence_settings_dialog: false,
+            snapshot_interval_input: graph_app
+                .snapshot_interval_secs()
+                .unwrap_or(crate::persistence::DEFAULT_SNAPSHOT_INTERVAL_SECS)
+                .to_string(),
+            persistence_settings_status: None,
             load_status: LoadStatus::Complete,
             status_text: None,
             can_go_back: false,
@@ -171,8 +225,84 @@ impl Gui {
             graph_app,
             last_frame_time: std::time::Instant::now(),
             webview_previous_url: HashMap::new(),
+            tile_rendering_contexts: HashMap::new(),
+            tile_favicon_textures: HashMap::new(),
             state: None,
         }
+    }
+
+    fn restore_tiles_tree_from_persistence(graph_app: &GraphBrowserApp) -> Tree<TileKind> {
+        let mut tiles = Tiles::default();
+        let graph_tile_id = tiles.insert_pane(TileKind::Graph);
+        let mut tiles_tree = Tree::new("graphshell_tiles", graph_tile_id, tiles);
+        if let Some(layout_json) = graph_app.load_tile_layout_json()
+            && let Ok(mut restored_tree) = serde_json::from_str::<Tree<TileKind>>(&layout_json)
+        {
+            Self::prune_stale_webview_tile_keys_only(&mut restored_tree, graph_app);
+            if restored_tree.root().is_some() {
+                tiles_tree = restored_tree;
+            }
+        }
+        tiles_tree
+    }
+
+    fn switch_persistence_store(
+        graph_app: &mut GraphBrowserApp,
+        window: &ServoShellWindow,
+        tiles_tree: &mut Tree<TileKind>,
+        webview_previous_url: &mut HashMap<WebViewId, Url>,
+        tile_rendering_contexts: &mut HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
+        tile_favicon_textures: &mut HashMap<NodeKey, (u64, egui::TextureHandle)>,
+        favicon_textures: &mut HashMap<WebViewId, (egui::TextureHandle, egui::load::SizedTexture)>,
+        data_dir: PathBuf,
+    ) -> Result<(), String> {
+        // Preflight the new directory first so failed switches are non-destructive.
+        crate::persistence::GraphStore::open(data_dir.clone()).map_err(|e| e.to_string())?;
+        let snapshot_interval_secs = graph_app.snapshot_interval_secs();
+
+        webview_controller::close_all_webviews(graph_app, window);
+        webview_previous_url.clear();
+        tile_rendering_contexts.clear();
+        tile_favicon_textures.clear();
+        favicon_textures.clear();
+        Self::remove_all_webview_tiles(tiles_tree);
+
+        graph_app.switch_persistence_dir(data_dir)?;
+        if let Some(secs) = snapshot_interval_secs {
+            graph_app.set_snapshot_interval_secs(secs)?;
+        }
+        *tiles_tree = Self::restore_tiles_tree_from_persistence(graph_app);
+        Ok(())
+    }
+
+    fn collect_tile_invariant_violations(
+        tiles_tree: &Tree<TileKind>,
+        graph_app: &GraphBrowserApp,
+        tile_rendering_contexts: &HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
+    ) -> Vec<String> {
+        let mut violations = Vec::new();
+        for node_key in Self::all_webview_tile_nodes(tiles_tree) {
+            if graph_app.graph.get_node(node_key).is_none() {
+                violations.push(format!(
+                    "tile/webview desync: tile has stale node key {}",
+                    node_key.index()
+                ));
+                continue;
+            }
+            if graph_app.get_webview_for_node(node_key).is_none() {
+                violations.push(format!(
+                    "tile/webview desync: node {} is missing webview mapping",
+                    node_key.index()
+                ));
+            }
+            if !tile_rendering_contexts.contains_key(&node_key) {
+                violations.push(format!(
+                    "tile/context desync: node {} is missing rendering context",
+                    node_key.index()
+                ));
+            }
+        }
+        violations
     }
 
     pub(crate) fn has_keyboard_focus(&self) -> bool {
@@ -182,7 +312,7 @@ impl Gui {
     }
 
     pub(crate) fn is_graph_view(&self) -> bool {
-        matches!(self.graph_app.view, crate::app::View::Graph)
+        !self.has_any_webview_tiles()
     }
     
     /// Set the RunningAppState reference for webview creation
@@ -207,7 +337,7 @@ impl Gui {
 
         // In graph view, consume user input events so they never reach a hidden WebView.
         // If a WebView tile is active, allow events through for that pane.
-        if matches!(self.graph_app.view, crate::app::View::Graph) && !self.has_active_webview_tile() {
+        if self.is_graph_view() && !self.has_active_webview_tile() {
             match event {
                 WindowEvent::KeyboardInput { .. }
                 | WindowEvent::ModifiersChanged(_)
@@ -232,12 +362,33 @@ impl Gui {
         self.toolbar_height
     }
 
-    /// Return true iff the given position is over the egui toolbar.
-    pub(crate) fn is_in_egui_toolbar_rect(
+    pub(crate) fn webview_at_point(
         &self,
-        position: Point2D<f32, DeviceIndependentPixel>,
-    ) -> bool {
-        position.y < self.toolbar_height.get()
+        point: Point2D<f32, DeviceIndependentPixel>,
+    ) -> Option<(WebViewId, Point2D<f32, DeviceIndependentPixel>)> {
+        let cursor = pos2(point.x, point.y);
+        for tile_id in self.tiles_tree.active_tiles() {
+            let Some(Tile::Pane(TileKind::WebView(node_key))) = self.tiles_tree.tiles.get(tile_id) else {
+                continue;
+            };
+            let Some(rect) = self.tiles_tree.tiles.rect(tile_id) else {
+                continue;
+            };
+            if !rect.contains(cursor) {
+                continue;
+            }
+            let Some(webview_id) = self.graph_app.get_webview_for_node(*node_key) else {
+                continue;
+            };
+            let local = Point2D::new(point.x - rect.min.x, point.y - rect.min.y);
+            return Some((webview_id, local));
+        }
+        None
+    }
+
+    pub(crate) fn focused_webview_id(&self) -> Option<WebViewId> {
+        Self::active_webview_tile_node(&self.tiles_tree)
+            .and_then(|node_key| self.graph_app.get_webview_for_node(node_key))
     }
 
     /// Create a frameless button with square sizing, as used in the toolbar.
@@ -349,6 +500,7 @@ impl Gui {
         self.ensure_tiles_tree_root();
         let Self {
             rendering_context,
+            window_rendering_context,
             context,
             tiles_tree,
             toolbar_height,
@@ -356,9 +508,17 @@ impl Gui {
             location_dirty,
             location_submitted,
             show_clear_data_confirm,
+            show_data_dir_dialog,
+            data_dir_input,
+            data_dir_status,
+            show_persistence_settings_dialog,
+            snapshot_interval_input,
+            persistence_settings_status,
             favicon_textures,
             graph_app,
             webview_previous_url,
+            tile_rendering_contexts,
+            tile_favicon_textures,
             state: app_state,
             ..
         } = self;
@@ -368,13 +528,27 @@ impl Gui {
             load_pending_favicons(ctx, window, graph_app, favicon_textures);
 
             // Handle keyboard shortcuts regardless of view (e.g., toggle view)
-            let keyboard_actions = input::collect_actions(ctx);
+            let mut keyboard_actions = input::collect_actions(ctx);
+            if keyboard_actions.toggle_view {
+                Self::toggle_tile_view(
+                    tiles_tree,
+                    graph_app,
+                    window,
+                    app_state,
+                    rendering_context,
+                    window_rendering_context,
+                    tile_rendering_contexts,
+                    webview_previous_url,
+                );
+                keyboard_actions.toggle_view = false;
+            }
             if keyboard_actions.delete_selected {
                 let nodes_to_close = graph_app.selected_nodes.clone();
                 webview_controller::close_webviews_for_nodes(graph_app, &nodes_to_close, window);
             }
             if keyboard_actions.clear_graph {
                 webview_controller::close_all_webviews(graph_app, window);
+                Self::remove_all_webview_tiles(tiles_tree);
                 webview_previous_url.clear();
             }
             input::apply_actions(graph_app, &keyboard_actions);
@@ -383,27 +557,69 @@ impl Gui {
             if graph_app.graph.node_count() == 0 {
                 webview_previous_url.clear();
                 graph_app.active_webview_nodes.clear();
+                tile_rendering_contexts.clear();
+                tile_favicon_textures.clear();
+                Self::remove_all_webview_tiles(tiles_tree);
             }
 
+            Self::prune_stale_webview_tiles(
+                tiles_tree,
+                graph_app,
+                window,
+                tile_rendering_contexts,
+                webview_previous_url,
+            );
+            tile_favicon_textures.retain(|node_key, _| graph_app.graph.get_node(*node_key).is_some());
+
             // Check which view mode we're in (used throughout rendering)
-            let is_graph_view = matches!(graph_app.view, crate::app::View::Graph);
-            let preserve_webviews_in_graph = is_graph_view && tiles_tree
-                .tiles
-                .iter()
-                .any(|(_, tile)| matches!(tile, Tile::Pane(TileKind::WebView(_))));
-            let should_sync_webviews = !is_graph_view || preserve_webviews_in_graph;
+            let has_webview_tiles = Self::has_any_webview_tiles_in(tiles_tree);
+            let is_graph_view = !has_webview_tiles;
+            let should_sync_webviews = has_webview_tiles;
+            let active_webview_node = Self::active_webview_tile_node(tiles_tree);
 
             // Webview lifecycle management (create/destroy based on view)
             webview_controller::manage_lifecycle(
                 graph_app,
                 window,
                 app_state,
-                preserve_webviews_in_graph,
+                has_webview_tiles,
+                active_webview_node,
             );
 
             // Sync webviews to graph nodes (only in detail view — graph view has no webviews)
             if should_sync_webviews {
-                webview_controller::sync_to_graph(graph_app, webview_previous_url, window);
+                let sync_result =
+                    webview_controller::sync_to_graph(graph_app, webview_previous_url, window);
+                Self::apply_webview_node_remaps(
+                    tiles_tree,
+                    &sync_result.remapped_nodes,
+                    tile_rendering_contexts,
+                    tile_favicon_textures,
+                );
+
+                // Keep WebView/context mappings complete for all tile nodes (not only visible ones).
+                for node_key in Self::all_webview_tile_nodes(tiles_tree) {
+                    Self::ensure_webview_for_node(
+                        graph_app,
+                        window,
+                        app_state,
+                        rendering_context,
+                        window_rendering_context,
+                        tile_rendering_contexts,
+                        node_key,
+                    );
+                }
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                for violation in Self::collect_tile_invariant_violations(
+                    tiles_tree,
+                    graph_app,
+                    tile_rendering_contexts,
+                ) {
+                    warn!("{violation}");
+                }
             }
 
             // TODO: While in fullscreen add some way to mitigate the increased phishing risk
@@ -495,10 +711,12 @@ impl Gui {
                                         );
                                     }
 
-                                    // Graph/Detail view toggle button
-                                    let (view_icon, view_tooltip) = match graph_app.view {
-                                        crate::app::View::Graph => ("🌐", "Switch to Detail View"),
-                                        crate::app::View::Detail(_) => ("🗺", "Switch to Graph View"),
+                                    // Graph/Detail mode toggle button (tile-driven).
+                                    let has_webview_tiles = Self::has_any_webview_tiles_in(tiles_tree);
+                                    let (view_icon, view_tooltip) = if has_webview_tiles {
+                                        ("🗺", "Switch to Graph View")
+                                    } else {
+                                        ("🌐", "Switch to Detail View")
                                     };
                                     let view_toggle_button = ui.add(Gui::toolbar_button(view_icon))
                                         .on_hover_text(view_tooltip);
@@ -508,7 +726,40 @@ impl Gui {
                                         info
                                     });
                                     if view_toggle_button.clicked() {
-                                        graph_app.toggle_view();
+                                        Self::toggle_tile_view(
+                                            tiles_tree,
+                                            graph_app,
+                                            window,
+                                            app_state,
+                                            rendering_context,
+                                            window_rendering_context,
+                                            tile_rendering_contexts,
+                                            webview_previous_url,
+                                        );
+                                    }
+
+                                    let data_dir_button = ui
+                                        .add(Gui::toolbar_button("Dir"))
+                                        .on_hover_text("Switch graph data directory");
+                                    data_dir_button.widget_info(|| {
+                                        let mut info = WidgetInfo::new(WidgetType::Button);
+                                        info.label = Some("Switch graph data directory".into());
+                                        info
+                                    });
+                                    if data_dir_button.clicked() {
+                                        *show_data_dir_dialog = true;
+                                    }
+
+                                    let persistence_settings_button = ui
+                                        .add(Gui::toolbar_button("Cfg"))
+                                        .on_hover_text("Persistence settings");
+                                    persistence_settings_button.widget_info(|| {
+                                        let mut info = WidgetInfo::new(WidgetType::Button);
+                                        info.label = Some("Persistence settings".into());
+                                        info
+                                    });
+                                    if persistence_settings_button.clicked() {
+                                        *show_persistence_settings_dialog = true;
                                     }
 
                                     let clear_data_button = ui
@@ -575,6 +826,11 @@ impl Gui {
                                             webview_previous_url, window,
                                         ) {
                                             *location_dirty = false;
+                                            if is_graph_view
+                                                && let Some(node_key) = graph_app.get_single_selected_node()
+                                            {
+                                                Self::open_or_focus_webview_tile(tiles_tree, node_key);
+                                            }
                                         }
                                     }
                                 },
@@ -584,7 +840,7 @@ impl Gui {
                 });
 
                 // Only show tab bar in detail view, not in graph view
-                if !is_graph_view {
+                if !has_webview_tiles {
                     // A simple Tab header strip
                     TopBottomPanel::top("tabs").show(ctx, |ui| {
                         ui.allocate_ui_with_layout(
@@ -641,6 +897,9 @@ impl Gui {
                             if ui.button("Clear Data").clicked() {
                                 webview_controller::close_all_webviews(graph_app, window);
                                 webview_previous_url.clear();
+                                tile_rendering_contexts.clear();
+                                tile_favicon_textures.clear();
+                                Self::remove_all_webview_tiles(tiles_tree);
                                 graph_app.clear_graph_and_persistence();
                                 *location_dirty = false;
                                 *show_clear_data_confirm = false;
@@ -652,6 +911,116 @@ impl Gui {
             // The toolbar height is where the Context’s available rect starts.
             // For reasons that are unclear, the TopBottomPanel’s ui cursor exceeds this by one egui
             // point, but the Context is correct and the TopBottomPanel is wrong.
+            if *show_data_dir_dialog {
+                egui::Window::new("Switch Graph Data Directory")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label("Enter a directory path to load/save graph data.");
+                        ui.add(
+                            egui::TextEdit::singleline(data_dir_input)
+                                .desired_width(480.0)
+                                .hint_text("C:\\path\\to\\graph_data"),
+                        );
+                        if let Some(message) = data_dir_status.as_deref() {
+                            ui.label(message);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Cancel").clicked() {
+                                *show_data_dir_dialog = false;
+                                *data_dir_status = None;
+                            }
+                            if ui.button("Switch").clicked() {
+                                let raw = data_dir_input.trim();
+                                if raw.is_empty() {
+                                    *data_dir_status =
+                                        Some("Enter a non-empty directory path.".to_string());
+                                    return;
+                                }
+                                let target_dir = PathBuf::from(raw);
+                                match Self::switch_persistence_store(
+                                    graph_app,
+                                    window,
+                                    tiles_tree,
+                                    webview_previous_url,
+                                    tile_rendering_contexts,
+                                    tile_favicon_textures,
+                                    favicon_textures,
+                                    target_dir.clone(),
+                                ) {
+                                    Ok(()) => {
+                                        *location = graph_app
+                                            .graph
+                                            .nodes()
+                                            .next()
+                                            .map(|(_, node)| node.url.clone())
+                                            .unwrap_or_default();
+                                        *snapshot_interval_input = graph_app
+                                            .snapshot_interval_secs()
+                                            .unwrap_or(crate::persistence::DEFAULT_SNAPSHOT_INTERVAL_SECS)
+                                            .to_string();
+                                        *location_dirty = false;
+                                        *location_submitted = false;
+                                        *show_data_dir_dialog = false;
+                                        *data_dir_input = target_dir.display().to_string();
+                                        *data_dir_status = None;
+                                    },
+                                    Err(e) => {
+                                        *data_dir_status =
+                                            Some(format!("Failed to switch data directory: {e}"));
+                                    },
+                                }
+                            }
+                        });
+                    });
+            }
+
+            if *show_persistence_settings_dialog {
+                egui::Window::new("Persistence Settings")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label("Snapshot interval (seconds):");
+                        ui.add(
+                            egui::TextEdit::singleline(snapshot_interval_input)
+                                .desired_width(180.0)
+                                .hint_text("300"),
+                        );
+                        if let Some(message) = persistence_settings_status.as_deref() {
+                            ui.label(message);
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Close").clicked() {
+                                *show_persistence_settings_dialog = false;
+                                *persistence_settings_status = None;
+                            }
+                            if ui.button("Apply").clicked() {
+                                let raw = snapshot_interval_input.trim();
+                                let parsed_secs = raw.parse::<u64>();
+                                match parsed_secs {
+                                    Ok(secs) => match graph_app.set_snapshot_interval_secs(secs) {
+                                        Ok(()) => {
+                                            *snapshot_interval_input = secs.to_string();
+                                            *persistence_settings_status =
+                                                Some("Snapshot interval updated.".to_string());
+                                        },
+                                        Err(e) => {
+                                            *persistence_settings_status =
+                                                Some(format!("Failed to update interval: {e}"));
+                                        },
+                                    },
+                                    Err(_) => {
+                                        *persistence_settings_status =
+                                            Some("Enter a valid positive integer.".to_string());
+                                    },
+                                }
+                            }
+                        });
+                    });
+            }
+
             *toolbar_height = Length::new(ctx.available_rect().min.y);
             
             // Update physics simulation (runs in both graph and detail view)
@@ -667,15 +1036,14 @@ impl Gui {
             if is_graph_view {
                 // === GRAPH VIEW: Only render the spatial graph ===
                 let mut pending_open_nodes = Vec::new();
-                let mut active_webview_nodes = Vec::new();
                 let mut pending_closed_nodes = Vec::new();
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::from_rgb(20, 20, 25)))
                     .show(ctx, |ui| {
-                        let mut behavior = GraphshellTileBehavior::new(graph_app);
+                        let mut behavior =
+                            GraphshellTileBehavior::new(graph_app, tile_favicon_textures);
                         tiles_tree.ui(&mut behavior, ui);
                         pending_open_nodes.extend(behavior.take_pending_open_nodes());
-                        active_webview_nodes.extend(behavior.take_active_webview_nodes());
                         pending_closed_nodes.extend(behavior.take_pending_closed_nodes());
                     });
                 for node_key in pending_open_nodes {
@@ -685,6 +1053,7 @@ impl Gui {
                     Self::close_webview_for_node(
                         graph_app,
                         window,
+                        tile_rendering_contexts,
                         webview_previous_url,
                         node_key,
                     );
@@ -701,31 +1070,68 @@ impl Gui {
                         Self::close_webview_for_node(
                             graph_app,
                             window,
+                            tile_rendering_contexts,
                             webview_previous_url,
                             node_key,
                         );
                     }
                 }
 
-                for node_key in active_webview_nodes.iter().copied() {
-                    Self::ensure_webview_for_node(graph_app, window, app_state, node_key);
+                let active_tile_rects = Self::active_webview_tile_rects(tiles_tree);
+                for (node_key, _) in active_tile_rects.iter().copied() {
+                    Self::ensure_webview_for_node(
+                        graph_app,
+                        window,
+                        app_state,
+                        rendering_context,
+                        window_rendering_context,
+                        tile_rendering_contexts,
+                        node_key,
+                    );
                 }
-                if let Some(node_key) = active_webview_nodes.first().copied()
+                if let Some((node_key, _)) = active_tile_rects.first().copied()
                     && let Some(wv_id) = graph_app.get_webview_for_node(node_key)
                 {
                     window.activate_webview(wv_id);
                 }
 
-                // Render the active webview tile via the existing offscreen callback path.
-                let active_node_for_composite = window
-                    .active_webview()
-                    .and_then(|wv| graph_app.get_node_for_webview(wv.id()));
-                let tile_rect = active_node_for_composite
-                    .and_then(|node_key| Self::webview_tile_rect_for_node(tiles_tree, node_key))
-                    .or_else(|| Self::active_webview_tile_rect(tiles_tree).map(|(_, rect)| rect));
-                if let Some(tile_rect) = tile_rect {
-                    window.repaint_webviews();
-                    if let Some(render_to_parent) = rendering_context.render_to_parent_callback() {
+                // Composite all visible WebView tiles with per-node rendering contexts.
+                let scale =
+                    Scale::<_, DeviceIndependentPixel, DevicePixel>::new(ctx.pixels_per_point());
+                for (node_key, tile_rect) in active_tile_rects {
+                    let size = Size2D::new(tile_rect.width(), tile_rect.height()) * scale;
+                    let target_size = PhysicalSize::new(
+                        size.width.max(1.0).round() as u32,
+                        size.height.max(1.0).round() as u32,
+                    );
+
+                    let Some(render_context) = tile_rendering_contexts.get(&node_key).cloned() else {
+                        continue;
+                    };
+
+                    if render_context.size() != target_size {
+                        render_context.resize(target_size);
+                    }
+
+                    let Some(webview_id) = graph_app.get_webview_for_node(node_key) else {
+                        continue;
+                    };
+                    let Some(webview) = window.webview_by_id(webview_id) else {
+                        continue;
+                    };
+                    if webview.size() != size {
+                        webview.resize(target_size);
+                    }
+
+                    if let Err(e) = render_context.make_current() {
+                        warn!("Failed to make tile rendering context current: {e:?}");
+                        continue;
+                    }
+                    render_context.prepare_for_rendering();
+                    webview.paint();
+                    render_context.present();
+
+                    if let Some(render_to_parent) = render_context.render_to_parent_callback() {
                         ctx.layer_painter(LayerId::background()).add(PaintCallback {
                             rect: tile_rect,
                             callback: Arc::new(CallbackFn::new(move |info, painter| {
@@ -801,6 +1207,69 @@ impl Gui {
         }
     }
 
+    fn has_any_webview_tiles(&self) -> bool {
+        Self::has_any_webview_tiles_in(&self.tiles_tree)
+    }
+
+    fn has_any_webview_tiles_in(tiles_tree: &Tree<TileKind>) -> bool {
+        tiles_tree
+            .tiles
+            .iter()
+            .any(|(_, tile)| matches!(tile, Tile::Pane(TileKind::WebView(_))))
+    }
+
+    fn preferred_detail_node(graph_app: &GraphBrowserApp) -> Option<crate::graph::NodeKey> {
+        graph_app
+            .get_single_selected_node()
+            .or_else(|| graph_app.graph.nodes().next().map(|(key, _)| key))
+    }
+
+    fn toggle_tile_view(
+        tiles_tree: &mut Tree<TileKind>,
+        graph_app: &mut GraphBrowserApp,
+        window: &ServoShellWindow,
+        app_state: &Option<Rc<RunningAppState>>,
+        base_rendering_context: &Rc<OffscreenRenderingContext>,
+        window_rendering_context: &Rc<WindowRenderingContext>,
+        tile_rendering_contexts: &mut HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
+        previous_urls: &mut HashMap<WebViewId, Url>,
+    ) {
+        if Self::has_any_webview_tiles_in(tiles_tree) {
+            let webview_nodes = Self::all_webview_tile_nodes(tiles_tree);
+            let tile_ids: Vec<_> = tiles_tree
+                .tiles
+                .iter()
+                .filter_map(|(tile_id, tile)| match tile {
+                    Tile::Pane(TileKind::WebView(_)) => Some(*tile_id),
+                    _ => None,
+                })
+                .collect();
+            for tile_id in tile_ids {
+                tiles_tree.remove_recursively(tile_id);
+            }
+            for node_key in webview_nodes {
+                Self::close_webview_for_node(
+                    graph_app,
+                    window,
+                    tile_rendering_contexts,
+                    previous_urls,
+                    node_key,
+                );
+            }
+        } else if let Some(node_key) = Self::preferred_detail_node(graph_app) {
+            Self::open_or_focus_webview_tile(tiles_tree, node_key);
+            Self::ensure_webview_for_node(
+                graph_app,
+                window,
+                app_state,
+                base_rendering_context,
+                window_rendering_context,
+                tile_rendering_contexts,
+                node_key,
+            );
+        }
+    }
+
     fn has_active_webview_tile(&self) -> bool {
         self.tiles_tree
             .active_tiles()
@@ -813,29 +1282,28 @@ impl Gui {
             })
     }
 
-    fn active_webview_tile_rect(tiles_tree: &Tree<TileKind>) -> Option<(crate::graph::NodeKey, egui::Rect)> {
-        for tile_id in tiles_tree.active_tiles() {
-            if let Some(Tile::Pane(TileKind::WebView(node_key))) = tiles_tree.tiles.get(tile_id) {
-                if let Some(rect) = tiles_tree.tiles.rect(tile_id) {
-                    return Some((*node_key, rect));
-                }
-            }
-        }
-        None
+    fn active_webview_tile_node(tiles_tree: &Tree<TileKind>) -> Option<crate::graph::NodeKey> {
+        tiles_tree
+            .active_tiles()
+            .into_iter()
+            .find_map(|tile_id| match tiles_tree.tiles.get(tile_id) {
+                Some(Tile::Pane(TileKind::WebView(node_key))) => Some(*node_key),
+                _ => None,
+            })
     }
 
-    fn webview_tile_rect_for_node(
+    fn active_webview_tile_rects(
         tiles_tree: &Tree<TileKind>,
-        target_node: crate::graph::NodeKey,
-    ) -> Option<egui::Rect> {
+    ) -> Vec<(crate::graph::NodeKey, egui::Rect)> {
+        let mut tile_rects = Vec::new();
         for tile_id in tiles_tree.active_tiles() {
             if let Some(Tile::Pane(TileKind::WebView(node_key))) = tiles_tree.tiles.get(tile_id)
-                && *node_key == target_node
+                && let Some(rect) = tiles_tree.tiles.rect(tile_id)
             {
-                return tiles_tree.tiles.rect(tile_id);
+                tile_rects.push((*node_key, rect));
             }
         }
-        None
+        tile_rects
     }
 
     fn all_webview_tile_nodes(tiles_tree: &Tree<TileKind>) -> HashSet<crate::graph::NodeKey> {
@@ -849,10 +1317,124 @@ impl Gui {
             .collect()
     }
 
+    fn prune_stale_webview_tile_keys_only(
+        tiles_tree: &mut Tree<TileKind>,
+        graph_app: &GraphBrowserApp,
+    ) {
+        let stale_nodes: Vec<_> = Self::all_webview_tile_nodes(tiles_tree)
+            .into_iter()
+            .filter(|node_key| graph_app.graph.get_node(*node_key).is_none())
+            .collect();
+        for node_key in stale_nodes {
+            Self::remove_webview_tile_for_node(tiles_tree, node_key);
+        }
+    }
+
+    fn remove_all_webview_tiles(tiles_tree: &mut Tree<TileKind>) {
+        let tile_ids: Vec<_> = tiles_tree
+            .tiles
+            .iter()
+            .filter_map(|(tile_id, tile)| match tile {
+                Tile::Pane(TileKind::WebView(_)) => Some(*tile_id),
+                _ => None,
+            })
+            .collect();
+        for tile_id in tile_ids {
+            tiles_tree.remove_recursively(tile_id);
+        }
+    }
+
+    fn remove_webview_tile_for_node(tiles_tree: &mut Tree<TileKind>, node_key: crate::graph::NodeKey) {
+        let tile_ids: Vec<_> = tiles_tree
+            .tiles
+            .iter()
+            .filter_map(|(tile_id, tile)| match tile {
+                Tile::Pane(TileKind::WebView(key)) if *key == node_key => Some(*tile_id),
+                _ => None,
+            })
+            .collect();
+        for tile_id in tile_ids {
+            tiles_tree.remove_recursively(tile_id);
+        }
+    }
+
+    fn apply_webview_node_remaps(
+        tiles_tree: &mut Tree<TileKind>,
+        remaps: &[(crate::graph::NodeKey, crate::graph::NodeKey)],
+        tile_rendering_contexts: &mut HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
+        tile_favicon_textures: &mut HashMap<NodeKey, (u64, egui::TextureHandle)>,
+    ) {
+        for &(from_key, to_key) in remaps {
+            if from_key == to_key {
+                continue;
+            }
+
+            let has_target_tile = tiles_tree
+                .tiles
+                .iter()
+                .any(|(_, tile)| matches!(tile, Tile::Pane(TileKind::WebView(key)) if *key == to_key));
+
+            let source_tiles: Vec<_> = tiles_tree
+                .tiles
+                .iter()
+                .filter_map(|(tile_id, tile)| match tile {
+                    Tile::Pane(TileKind::WebView(key)) if *key == from_key => Some(*tile_id),
+                    _ => None,
+                })
+                .collect();
+
+            if has_target_tile {
+                for tile_id in source_tiles {
+                    tiles_tree.remove_recursively(tile_id);
+                }
+            } else {
+                for tile_id in source_tiles {
+                    if let Some(Tile::Pane(TileKind::WebView(key))) = tiles_tree.tiles.get_mut(tile_id) {
+                        *key = to_key;
+                    }
+                }
+            }
+
+            if let Some(context) = tile_rendering_contexts.remove(&from_key) {
+                tile_rendering_contexts.entry(to_key).or_insert(context);
+            }
+            if let Some(texture) = tile_favicon_textures.remove(&from_key) {
+                tile_favicon_textures.entry(to_key).or_insert(texture);
+            }
+        }
+    }
+
+    fn prune_stale_webview_tiles(
+        tiles_tree: &mut Tree<TileKind>,
+        graph_app: &mut GraphBrowserApp,
+        window: &ServoShellWindow,
+        tile_rendering_contexts: &mut HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
+        previous_urls: &mut HashMap<WebViewId, Url>,
+    ) {
+        let stale_nodes: Vec<_> = Self::all_webview_tile_nodes(tiles_tree)
+            .into_iter()
+            .filter(|node_key| graph_app.graph.get_node(*node_key).is_none())
+            .collect();
+
+        for node_key in stale_nodes {
+            Self::remove_webview_tile_for_node(tiles_tree, node_key);
+            Self::close_webview_for_node(
+                graph_app,
+                window,
+                tile_rendering_contexts,
+                previous_urls,
+                node_key,
+            );
+        }
+    }
+
     fn ensure_webview_for_node(
         graph_app: &mut GraphBrowserApp,
         window: &ServoShellWindow,
         app_state: &Option<Rc<RunningAppState>>,
+        base_rendering_context: &Rc<OffscreenRenderingContext>,
+        window_rendering_context: &Rc<WindowRenderingContext>,
+        tile_rendering_contexts: &mut HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
         node_key: crate::graph::NodeKey,
     ) {
         if graph_app.get_webview_for_node(node_key).is_some() {
@@ -861,8 +1443,14 @@ impl Gui {
         let (Some(node), Some(state)) = (graph_app.graph.get_node(node_key), app_state.as_ref()) else {
             return;
         };
+        let render_context = tile_rendering_contexts
+            .entry(node_key)
+            .or_insert_with(|| {
+                Rc::new(window_rendering_context.offscreen_context(base_rendering_context.size()))
+            })
+            .clone();
         let url = Url::parse(&node.url).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
-        let webview = window.create_toplevel_webview(state.clone(), url);
+        let webview = window.create_toplevel_webview_with_context(state.clone(), url, render_context);
         graph_app.map_webview_to_node(webview.id(), node_key);
         graph_app.promote_node_to_active(node_key);
     }
@@ -870,6 +1458,7 @@ impl Gui {
     fn close_webview_for_node(
         graph_app: &mut GraphBrowserApp,
         window: &ServoShellWindow,
+        tile_rendering_contexts: &mut HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
         previous_urls: &mut HashMap<WebViewId, Url>,
         node_key: crate::graph::NodeKey,
     ) {
@@ -878,6 +1467,7 @@ impl Gui {
             graph_app.unmap_webview(wv_id);
             previous_urls.remove(&wv_id);
         }
+        tile_rendering_contexts.remove(&node_key);
         graph_app.demote_node_to_cold(node_key);
     }
 
@@ -925,7 +1515,7 @@ impl Gui {
         }
 
         // In graph view, show the selected node's URL instead of a webview URL
-        if matches!(self.graph_app.view, crate::app::View::Graph) {
+        if self.is_graph_view() {
             if let Some(key) = self.graph_app.get_single_selected_node() {
                 if let Some(node) = self.graph_app.graph.get_node(key) {
                     if node.url != self.location {
@@ -1029,6 +1619,171 @@ impl Gui {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_tiles::{Container, Tile, Tiles, Tree};
+
+    fn tree_with_graph_root() -> Tree<TileKind> {
+        let mut tiles = Tiles::default();
+        let graph_tile_id = tiles.insert_pane(TileKind::Graph);
+        Tree::new("test_tree", graph_tile_id, tiles)
+    }
+
+    fn webview_tile_count(tiles_tree: &Tree<TileKind>, node_key: NodeKey) -> usize {
+        tiles_tree
+            .tiles
+            .iter()
+            .filter(|(_, tile)| matches!(tile, Tile::Pane(TileKind::WebView(key)) if *key == node_key))
+            .count()
+    }
+
+    #[test]
+    fn test_open_webview_tile_creates_tabs_container() {
+        let mut tree = tree_with_graph_root();
+        let node_key = NodeKey::new(1);
+
+        Gui::open_or_focus_webview_tile(&mut tree, node_key);
+
+        assert!(Gui::has_any_webview_tiles_in(&tree));
+        let root_id = tree.root().expect("root tile should exist");
+        match tree.tiles.get(root_id) {
+            Some(Tile::Container(Container::Tabs(tabs))) => {
+                assert_eq!(tabs.children.len(), 2);
+            },
+            _ => panic!("expected tabs container root"),
+        }
+    }
+
+    #[test]
+    fn test_open_duplicate_tile_focuses_existing() {
+        let mut tree = tree_with_graph_root();
+        let node_key = NodeKey::new(7);
+
+        Gui::open_or_focus_webview_tile(&mut tree, node_key);
+        Gui::open_or_focus_webview_tile(&mut tree, node_key);
+
+        assert_eq!(webview_tile_count(&tree, node_key), 1);
+    }
+
+    #[test]
+    fn test_close_last_webview_tile_leaves_graph_only() {
+        let mut tree = tree_with_graph_root();
+        let node_key = NodeKey::new(3);
+        Gui::open_or_focus_webview_tile(&mut tree, node_key);
+
+        Gui::remove_all_webview_tiles(&mut tree);
+
+        assert!(!Gui::has_any_webview_tiles_in(&tree));
+        let has_graph_pane = tree
+            .tiles
+            .iter()
+            .any(|(_, tile)| matches!(tile, Tile::Pane(TileKind::Graph)));
+        assert!(has_graph_pane);
+    }
+
+    #[test]
+    fn test_all_webview_tile_nodes_tracks_correctly() {
+        let mut tree = tree_with_graph_root();
+        let a = NodeKey::new(1);
+        let b = NodeKey::new(2);
+        Gui::open_or_focus_webview_tile(&mut tree, a);
+        Gui::open_or_focus_webview_tile(&mut tree, b);
+
+        let nodes = Gui::all_webview_tile_nodes(&tree);
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.contains(&a));
+        assert!(nodes.contains(&b));
+    }
+
+    #[test]
+    fn test_navigation_updates_tile_pane() {
+        let mut tree = tree_with_graph_root();
+        let old_key = NodeKey::new(10);
+        let new_key = NodeKey::new(11);
+        Gui::open_or_focus_webview_tile(&mut tree, old_key);
+
+        let mut contexts: HashMap<NodeKey, Rc<OffscreenRenderingContext>> = HashMap::new();
+        let mut textures: HashMap<NodeKey, (u64, egui::TextureHandle)> = HashMap::new();
+        Gui::apply_webview_node_remaps(
+            &mut tree,
+            &[(old_key, new_key)],
+            &mut contexts,
+            &mut textures,
+        );
+
+        let nodes = Gui::all_webview_tile_nodes(&tree);
+        assert!(!nodes.contains(&old_key));
+        assert!(nodes.contains(&new_key));
+    }
+
+    #[test]
+    fn test_navigation_remap_deduplicates_when_target_exists() {
+        let mut tree = tree_with_graph_root();
+        let old_key = NodeKey::new(21);
+        let new_key = NodeKey::new(22);
+        Gui::open_or_focus_webview_tile(&mut tree, old_key);
+        Gui::open_or_focus_webview_tile(&mut tree, new_key);
+
+        let mut contexts: HashMap<NodeKey, Rc<OffscreenRenderingContext>> = HashMap::new();
+        let mut textures: HashMap<NodeKey, (u64, egui::TextureHandle)> = HashMap::new();
+        Gui::apply_webview_node_remaps(
+            &mut tree,
+            &[(old_key, new_key)],
+            &mut contexts,
+            &mut textures,
+        );
+
+        assert_eq!(webview_tile_count(&tree, new_key), 1);
+    }
+
+    #[test]
+    fn test_stale_node_cleanup_removes_tile() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let alive_key = app.add_node_and_sync("https://alive.example".into(), Point2D::new(0.0, 0.0));
+        let stale_key = NodeKey::new(9999);
+        let mut tree = tree_with_graph_root();
+        Gui::open_or_focus_webview_tile(&mut tree, alive_key);
+        Gui::open_or_focus_webview_tile(&mut tree, stale_key);
+
+        Gui::prune_stale_webview_tile_keys_only(&mut tree, &app);
+        let nodes = Gui::all_webview_tile_nodes(&tree);
+        assert!(nodes.contains(&alive_key));
+        assert!(!nodes.contains(&stale_key));
+    }
+
+    #[test]
+    fn test_tile_layout_serde_roundtrip() {
+        let mut tree = tree_with_graph_root();
+        let a = NodeKey::new(5);
+        let b = NodeKey::new(6);
+        Gui::open_or_focus_webview_tile(&mut tree, a);
+        Gui::open_or_focus_webview_tile(&mut tree, b);
+
+        let json = serde_json::to_string(&tree).expect("serialize tree");
+        let restored: Tree<TileKind> = serde_json::from_str(&json).expect("deserialize tree");
+        let nodes = Gui::all_webview_tile_nodes(&restored);
+
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.contains(&a));
+        assert!(nodes.contains(&b));
+    }
+
+    #[test]
+    fn test_invariant_check_detects_desync() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let node_key = app.add_node_and_sync("https://example.test".into(), Point2D::new(0.0, 0.0));
+        let mut tree = tree_with_graph_root();
+        Gui::open_or_focus_webview_tile(&mut tree, node_key);
+
+        let contexts: HashMap<NodeKey, Rc<OffscreenRenderingContext>> = HashMap::new();
+        let violations = Gui::collect_tile_invariant_violations(&tree, &app, &contexts);
+
+        assert!(violations.iter().any(|v| v.contains("missing webview mapping")));
+        assert!(violations.iter().any(|v| v.contains("missing rendering context")));
+    }
+}
+
 /// Convert a Servo image to RGBA8 bytes.
 fn embedder_image_to_rgba(image: &Image) -> (usize, usize, Vec<u8>) {
     let width = image.width as usize;
@@ -1104,3 +1859,5 @@ fn load_pending_favicons(
         }
     }
 }
+
+

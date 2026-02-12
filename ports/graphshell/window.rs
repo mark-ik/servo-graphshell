@@ -85,7 +85,16 @@ impl ServoShellWindow {
     }
 
     pub(crate) fn create_toplevel_webview(&self, state: Rc<RunningAppState>, url: Url) -> WebView {
-        let webview = WebViewBuilder::new(state.servo(), self.platform_window.rendering_context())
+        self.create_toplevel_webview_with_context(state, url, self.platform_window.rendering_context())
+    }
+
+    pub(crate) fn create_toplevel_webview_with_context(
+        &self,
+        state: Rc<RunningAppState>,
+        url: Url,
+        rendering_context: Rc<dyn RenderingContext>,
+    ) -> WebView {
+        let webview = WebViewBuilder::new(state.servo(), rendering_context)
             .url(url)
             .hidpi_scale_factor(self.platform_window.hidpi_scale_factor())
             .user_content_manager(state.user_content_manager.clone())

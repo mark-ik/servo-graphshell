@@ -2,31 +2,32 @@
 
 **Document Type**: Feature-driven implementation plan
 **Organization**: By feature targets with validation tests (not calendar time)
-**Last Updated**: February 11, 2026
-**Priority Focus**: Phase 1 Core Browsing Graph — 4 of 5 feature targets complete  
+**Last Updated**: February 12, 2026
+**Priority Focus**: Post-egui_tiles stabilization and FT2 completion
 
 ---
 
 ## Current State
 
-**Core Browsing Graph Functional** (~4,500 LOC):
+**Core Browsing Graph Functional** (headed egui_tiles runtime complete):
 
-- ✅ Graph data structures (petgraph StableGraph, NodeIndex/EdgeIndex keys)
-- ✅ Force-directed physics engine (kiddo KD-tree, springs, damping)
-- ✅ Physics worker thread (crossbeam channels, non-blocking, 60 FPS)
-- ✅ egui_graphs rendering (GraphView widget, zoom/pan, selection, events)
-- ✅ Keyboard input (T/P/C/N/Home/Esc/Del shortcuts, guarded when text focused)
-- ✅ Zoom/pan via egui_graphs (post-frame clamp for bounds enforcement)
-- ✅ View model (Graph/Detail toggle)
-- ✅ Servo webview integration (create/destroy, navigation tracking, edge creation)
-- ✅ Graph persistence (fjall log + redb snapshots + rkyv serialization)
-- ✅ Camera fit-to-screen (C key, egui_graphs `fit_to_screen`)
+- [x] Graph data structures (petgraph StableGraph, NodeIndex/EdgeIndex keys)
+- [x] Multi-pane tile runtime (egui_tiles): tile tree, per-pane rendering contexts, tile layout persistence
+- [x] Runtime persistence controls: data directory switching and snapshot interval configurability
+- [x] egui_graphs rendering (GraphView widget, zoom/pan, selection, events)
+- [x] Keyboard input and view controls (guarded when text fields are focused)
+- [x] Tile-derived view state (legacy `View` enum retired)
+- [x] Servo webview integration (create/destroy, navigation tracking, edge creation)
+- [x] Graph persistence (fjall log + redb snapshots + rkyv serialization)
+- [x] Camera fit-to-screen (C key, egui_graphs `fit_to_screen`)
 
-**Remaining Gap**:
+**Current Gaps**:
 
-- ❌ Thumbnails & favicon rendering (nodes are colored circles, not page previews)
+- [ ] Physics architecture migration: replace custom physics/worker path with egui_graphs force-directed integration
+- [ ] Selection state consolidation: remove duplicated app/node selection state
+- [ ] FT2 completion: thumbnail pipeline (favicon vertical slice already implemented)
 
-**Status**: Can browse real websites in a spatial graph that persists across sessions. Thumbnails are the remaining Phase 1 feature.
+**Status**: Core browsing, tiled webviews, and persistence are production-functional. Next execution block is physics/selection simplification, then FT2 thumbnail completion.
 
 ---
 
@@ -39,12 +40,16 @@ These five features enable the core MVP: **users can browse real websites in a s
 | # | Feature | Status | Implementation |
 | --- | ------- | ------ | -------------- |
 | 1 | Servo Webview Integration | ✅ Complete | gui.rs: webview lifecycle, navigation tracking, edge creation |
-| 2 | Thumbnail & Favicon Rendering | ❌ Not started | Nodes are colored circles — next priority |
+| 2 | Thumbnail & Favicon Rendering | In progress | Favicon vertical slice done; thumbnail capture/persistence remains |
 | 3 | Graph Persistence | ✅ Complete | fjall log + redb snapshots + rkyv serialization |
 | 4 | Camera Zoom Integration | ✅ Complete | egui_graphs built-in zoom/pan + post-frame clamp |
 | 5 | Center Camera | ✅ Complete | egui_graphs fit_to_screen via C key |
 
-**After these 5**: Search (Feature 6), Bookmarks import (Feature 7), Performance (Feature 8), Clipping (Feature 9), Diagnostics (Feature 10), P2P (Feature 11)
+**Execution order now**:
+1. Physics migration (see implementation_strategy/2026-02-12_physics_selection_plan.md)
+2. Selection consolidation (same plan)
+3. FT2 thumbnail completion (see implementation_strategy/2026-02-11_thumbnails_favicons_plan.md)
+4. FT6 search/filtering (`nucleo`)
 
 ---
 
@@ -453,3 +458,4 @@ These five features enable the core MVP: **users can browse real websites in a s
 - **Project Vision**: `PROJECT_DESCRIPTION.md`
 - **Architecture**: `ARCHITECTURAL_OVERVIEW.md`
 - **Code**: `ports/graphshell/` (~4,500 LOC in core modules)
+
