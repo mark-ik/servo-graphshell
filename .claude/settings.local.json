@@ -18,7 +18,8 @@
       "Bash(cargo doc:*)",
       "Bash(cargo info:*)",
       "Bash(grep:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(python mach:*)"
     ]
   }
 }

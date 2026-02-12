@@ -49,7 +49,7 @@ impl EguiGraphState {
                 node.set_location(Pos2::new(position.x, position.y));
 
                 // Set label (truncated title)
-                let label = truncate_label(&title, 20);
+                let label = crate::util::truncate_with_ellipsis(&title, 20);
                 node.set_label(label);
 
                 // Set color based on lifecycle and selection
@@ -95,15 +95,6 @@ impl EguiGraphState {
     /// Get NodeIndex from a NodeKey (test helper — identity since NodeKey = NodeIndex)
     fn get_index(&self, key: NodeKey) -> Option<NodeIndex> {
         self.graph.node(key).map(|_| key)
-    }
-}
-
-/// Truncate a string with ellipsis for node labels
-fn truncate_label(s: &str, max_len: usize) -> String {
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    } else {
-        s.to_string()
     }
 }
 
@@ -189,10 +180,10 @@ mod tests {
 
     #[test]
     fn test_truncate_label() {
-        assert_eq!(truncate_label("short", 20), "short");
-        assert_eq!(
-            truncate_label("this is a very long title that should be truncated", 20),
-            "this is a very lo..."
-        );
+        use crate::util::truncate_with_ellipsis;
+        assert_eq!(truncate_with_ellipsis("short", 20), "short");
+        let result = truncate_with_ellipsis("this is a very long title that should be truncated", 20);
+        assert_eq!(result.chars().count(), 20);
+        assert!(result.ends_with('\u{2026}'));
     }
 }

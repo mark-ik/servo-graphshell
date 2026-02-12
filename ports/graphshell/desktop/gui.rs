@@ -79,14 +79,7 @@ pub struct Gui {
     state: Option<Rc<RunningAppState>>,
 }
 
-fn truncate_with_ellipsis(input: &str, max_length: usize) -> String {
-    if input.chars().count() > max_length {
-        let truncated: String = input.chars().take(max_length.saturating_sub(1)).collect();
-        format!("{}…", truncated)
-    } else {
-        input.to_string()
-    }
-}
+use crate::util::truncate_with_ellipsis;
 
 impl Drop for Gui {
     fn drop(&mut self) {

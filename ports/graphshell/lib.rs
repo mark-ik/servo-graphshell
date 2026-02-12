@@ -14,6 +14,7 @@ mod input;
 mod persistence;
 mod physics;
 mod render;
+mod util;
 
 #[cfg(not(target_os = "android"))]
 mod backtrace;

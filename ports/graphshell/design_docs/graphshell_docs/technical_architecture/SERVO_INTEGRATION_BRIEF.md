@@ -1,7 +1,7 @@
 # Servo Integration Brief
 
 **Purpose**: Integrate Servo's webview system into Graphshell's graph browsing model  
-**Status**: Architectural overview (Feature Target 1 planning)  
+**Status**: Implemented in core graph browsing (Feature Target 1 complete)  
 **Scope**: Node ↔ Webview lifecycle binding, navigation hooks, multi-webview management  
 **References**: [IMPLEMENTATION_ROADMAP.md](../IMPLEMENTATION_ROADMAP.md) Feature Target 1, [GRAPHSHELL_AS_BROWSER.md](../GRAPHSHELL_AS_BROWSER.md)
 
@@ -10,10 +10,10 @@
 ## Current State
 
 **Graphshell Foundation** (ports/graphshell/):
-- Graph structures exist (SlotMap-based Nodes with URL, title, position)
-- Application state (`app.rs`) defines Node and webview mapping structures
-- HashMap<WebViewId, NodeKey> mappings defined but not populated
-- No actual webview creation/destruction code
+- Graph structures use petgraph `StableGraph` with URL/title/position metadata
+- Application state (`app.rs`) manages WebViewId ↔ NodeKey mappings
+- Webview lifecycle and navigation tracking implemented in `desktop/gui.rs`
+- Graph view destroys webviews to avoid framebuffer bleed-through
 
 **Servo Capabilities** (libservo):
 - WebViewManager for creating/destroying browsing contexts
@@ -165,59 +165,19 @@ pub fn handle_mouse_event(...) {
 
 ## Implementation Steps (Feature Target 1)
 
-### Phase 1.1: Study & Setup (2-3 days)
+### Completed Integration
 
-1. **Explore servoshell codebase**:
-   - Locate WebViewManager API in libservo/servo/src/window.rs
-   - Study WindowMethods trait (methods available for webview control)
-   - Understand event loop integration (how navigation events propagate)
+1. **Webview creation/destruction**
+    - Webviews created on demand and torn down when view switches to graph.
+    - Bidirectional mapping maintained in application state.
 
-2. **Map Servo's webview API**:
-   - WebViewManager::create() signature → what parameters?
-   - How to load URL? (WindowMethods::load_url() or script message?)
-   - How to handle navigation? (intercept before loading? use script process hooks?)
-   - How to get favicon/title metadata?
+2. **Navigation tracking**
+    - URL changes detected and reflected as node + edge updates.
+    - History vs hyperlink edges distinguished in navigation logic.
 
-3. **Identify integration points**:
-   - Where does webview ID get assigned?
-   - Where do navigation events fire?
-   - How to hook page load completion?
-
-### Phase 1.2: Basic Integration (1 week)
-
-1. **Implement webview creation/destruction**:
-   - Add WebViewManager field to GraphBrowserApp
-   - Implement create_webview_for_node()
-   - Implement destroy_webview()
-   - Test: Create → Load URL → Destroy cycle works
-
-2. **Implement bidirectional mapping**:
-   - HashMap<WebViewId, NodeKey> synchronization
-   - Ensure no leaks on node deletion
-   - Test: 100 create/destroy cycles → no memory leaks
-
-3. **Implement navigation on link click**:
-   - Hook link click events from Servo
-   - Call on_link_clicked(source_node, new_url)
-   - Create new node if URL not in graph
-   - Create Hyperlink edge
-
-### Phase 1.3: Lifecycle Management (1 week)
-
-1. **Implement Active/Warm/Cold transitions**:
-   - When node selected → promote to Active (or create if Cold)
-   - When node deselected → move to Warm pool (if space)
-   - When Warm pool full → evict oldest to Cold (destroy webview)
-
-2. **Implement lifecycle persistence**:
-   - Track node state in Node struct (Active/Warm/Cold)
-   - Physics engine respects lifecycle (don't simulate Cold nodes)
-   - Rendering respects lifecycle (show favicon for Cold, full webview for Active)
-
-3. **Test scenarios**:
-   - Browse 10 pages → max 7 webviews in memory ✓
-   - Navigate back to cold node → recreate webview on demand ✓
-   - 30-minute browsing session → no memory creep ✓
+3. **Lifecycle handling**
+    - Active webview shown in detail view; graph view destroys webviews.
+    - Remaining lifecycle tiers are planned for Phase 1.5+ (thumbnails/favicons).
 
 ---
 

@@ -3,7 +3,7 @@
 **Purpose**: Detailed specification for how Graphshell operates as a functional web browser (graph-first UX with a Servo-backed detail view).
 
 **Document Type**: Behavior specification (not implementation status)  
-**Status**: Foundation implemented (~3,500 LOC), Servo integration in progress  
+**Status**: Core browsing graph functional (~4,500 LOC), Servo integration complete  
 **See**: [ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md) for actual code status
 
 ---

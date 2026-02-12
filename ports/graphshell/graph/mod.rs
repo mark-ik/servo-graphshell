@@ -131,6 +131,16 @@ impl Graph {
         }
     }
 
+    /// Update a node's URL, maintaining the url_to_node index.
+    /// Returns the old URL, or None if the node doesn't exist.
+    pub fn update_node_url(&mut self, key: NodeKey, new_url: String) -> Option<String> {
+        let node = self.inner.node_weight_mut(key)?;
+        let old_url = std::mem::replace(&mut node.url, new_url.clone());
+        self.url_to_node.remove(&old_url);
+        self.url_to_node.insert(new_url, key);
+        Some(old_url)
+    }
+
     /// Add an edge between two nodes
     pub fn add_edge(
         &mut self,

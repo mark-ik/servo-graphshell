@@ -224,6 +224,19 @@ impl GraphStore {
                         }
                     }
                 },
+                ArchivedLogEntry::RemoveNode { url } => {
+                    if let Some((key, _)) = graph.get_node_by_url(url.as_str()) {
+                        graph.remove_node(key);
+                    }
+                },
+                ArchivedLogEntry::ClearGraph => {
+                    *graph = Graph::new();
+                },
+                ArchivedLogEntry::UpdateNodeUrl { old_url, new_url } => {
+                    if let Some((key, _)) = graph.get_node_by_url(old_url.as_str()) {
+                        graph.update_node_url(key, new_url.to_string());
+                    }
+                },
             }
         }
     }
@@ -425,5 +438,110 @@ mod tests {
         let graph = store.recover().unwrap();
         let (_, node) = graph.get_node_by_url("https://a.com").unwrap();
         assert_eq!(node.title, "My Site");
+    }
+
+    #[test]
+    fn test_log_remove_node_recover() {
+        let (mut store, _dir) = create_test_store();
+
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://a.com".to_string(),
+            position_x: 0.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://b.com".to_string(),
+            position_x: 100.0,
+            position_y: 100.0,
+        });
+        store.log_mutation(&LogEntry::RemoveNode {
+            url: "https://a.com".to_string(),
+        });
+
+        let graph = store.recover().unwrap();
+        assert_eq!(graph.node_count(), 1);
+        assert!(graph.get_node_by_url("https://a.com").is_none());
+        assert!(graph.get_node_by_url("https://b.com").is_some());
+    }
+
+    #[test]
+    fn test_log_clear_graph_recover() {
+        let (mut store, _dir) = create_test_store();
+
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://a.com".to_string(),
+            position_x: 0.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://b.com".to_string(),
+            position_x: 100.0,
+            position_y: 100.0,
+        });
+        store.log_mutation(&LogEntry::ClearGraph);
+
+        let recovered = store.recover();
+        assert!(recovered.is_none()); // Empty graph returns None
+    }
+
+    #[test]
+    fn test_log_clear_then_add_recover() {
+        let (mut store, _dir) = create_test_store();
+
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://old.com".to_string(),
+            position_x: 0.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::ClearGraph);
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://new.com".to_string(),
+            position_x: 50.0,
+            position_y: 50.0,
+        });
+
+        let graph = store.recover().unwrap();
+        assert_eq!(graph.node_count(), 1);
+        assert!(graph.get_node_by_url("https://old.com").is_none());
+        assert!(graph.get_node_by_url("https://new.com").is_some());
+    }
+
+    #[test]
+    fn test_log_update_node_url_recover() {
+        let (mut store, _dir) = create_test_store();
+
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://old.com".to_string(),
+            position_x: 10.0,
+            position_y: 20.0,
+        });
+        store.log_mutation(&LogEntry::UpdateNodeUrl {
+            old_url: "https://old.com".to_string(),
+            new_url: "https://new.com".to_string(),
+        });
+
+        let graph = store.recover().unwrap();
+        assert_eq!(graph.node_count(), 1);
+        assert!(graph.get_node_by_url("https://old.com").is_none());
+        let (_, node) = graph.get_node_by_url("https://new.com").unwrap();
+        assert_eq!(node.position.x, 10.0);
+        assert_eq!(node.position.y, 20.0);
+    }
+
+    #[test]
+    fn test_remove_nonexistent_node_noop() {
+        let (mut store, _dir) = create_test_store();
+
+        store.log_mutation(&LogEntry::AddNode {
+            url: "https://a.com".to_string(),
+            position_x: 0.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::RemoveNode {
+            url: "https://nonexistent.com".to_string(),
+        });
+
+        let graph = store.recover().unwrap();
+        assert_eq!(graph.node_count(), 1);
     }
 }

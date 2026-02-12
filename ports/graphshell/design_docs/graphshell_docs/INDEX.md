@@ -74,6 +74,19 @@
 | -------- | ------- | --------- |
 | **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** | Feature targets, validation criteria, tech stack | Before implementing features |
 
+**Feature Plans (by target)**
+
+- **[implementation_strategy/2026-02-11_thumbnails_favicons_plan.md](implementation_strategy/2026-02-11_thumbnails_favicons_plan.md)** — Feature Target 2
+- **[implementation_strategy/2026-02-11_graph_persistence_plan.md](implementation_strategy/2026-02-11_graph_persistence_plan.md)** — Feature Target 3
+- **[implementation_strategy/2026-02-11_camera_zoom_plan.md](implementation_strategy/2026-02-11_camera_zoom_plan.md)** — Feature Target 4
+- **[implementation_strategy/2026-02-11_center_camera_plan.md](implementation_strategy/2026-02-11_center_camera_plan.md)** — Feature Target 5
+- **[implementation_strategy/2026-02-11_search_filtering_plan.md](implementation_strategy/2026-02-11_search_filtering_plan.md)** — Feature Target 6
+- **[implementation_strategy/2026-02-11_bookmarks_history_import_plan.md](implementation_strategy/2026-02-11_bookmarks_history_import_plan.md)** — Feature Target 7
+- **[implementation_strategy/2026-02-11_performance_optimization_plan.md](implementation_strategy/2026-02-11_performance_optimization_plan.md)** — Feature Target 8
+- **[implementation_strategy/2026-02-11_clipping_dom_extraction_plan.md](implementation_strategy/2026-02-11_clipping_dom_extraction_plan.md)** — Feature Target 9
+- **[implementation_strategy/2026-02-11_diagnostic_inspector_plan.md](implementation_strategy/2026-02-11_diagnostic_inspector_plan.md)** — Feature Target 10
+- **[implementation_strategy/2026-02-11_p2p_collaboration_plan.md](implementation_strategy/2026-02-11_p2p_collaboration_plan.md)** — Feature Target 11
+
 ### 6. Phase 3+ Research (P2P/Tokenization)
 
 | Document | Purpose | Phase |

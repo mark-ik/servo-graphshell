@@ -13,10 +13,10 @@ cd servo
 git checkout graphshell  # Fork by mark-ik
 
 # Build (requires Python 3.8+, Rust 1.91+)
-./mach build --release -p graphshell
+./mach build -r graphshell
 
 # Run
-./mach run -p graphshell
+./mach run -r graphshell -- https://example.com
 ```
 
 For detailed setup, see **[BUILD.md](BUILD.md)**. For implementation status, see **[ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md)**.
@@ -47,6 +47,7 @@ Graphshell is a spatial browser built on Servo's engine. Webpages are nodes in a
 - **[QUICKSTART.md](QUICKSTART.md)** — Quick reference for building
 - **[technical_architecture/SERVO_INTEGRATION_BRIEF.md](technical_architecture/SERVO_INTEGRATION_BRIEF.md)** — Servo webview integration architecture
 - **[INDEX.md](INDEX.md)** — Complete documentation map
+- **[implementation_strategy/](implementation_strategy/)** — Feature target plan files
 
 ### Archived Planning Docs
 
@@ -89,12 +90,12 @@ Graphshell is a spatial browser built on Servo's engine. Webpages are nodes in a
 | --------- | ---------- | ----- |
 | Language | Rust 1.91+ | Performance, safety, Servo compatibility |
 | Browser Engine | Servo (libservo) | Webview lifecycle, navigation tracking |
-| UI Framework | egui 0.31 | Immediate mode, integrated with Servo |
+| UI Framework | egui 0.33.3 | Immediate mode, integrated with Servo |
 | Graph Storage | petgraph 0.8 (StableGraph) | Stable indices, algorithm ecosystem |
 | Graph Visualization | egui_graphs 0.29 | GraphView widget, events, zoom/pan |
 | Physics | Custom + kiddo 4.2 KD-tree | O(n) with spatial queries, springs + repulsion |
 | Worker Thread | crossbeam_channel | Non-blocking physics, 60fps target |
-| Persistence | fjall 3 + redb 2 + rkyv 0.8 | Append log + snapshots + zero-copy serialization |
+| Persistence | fjall 3 + redb 3 + rkyv 0.8 | Append log + snapshots + zero-copy serialization |
 | Geometry | euclid | 2D math (Point2D, Vector2D) |
 
 ---

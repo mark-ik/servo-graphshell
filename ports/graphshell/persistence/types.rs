@@ -64,6 +64,14 @@ pub enum LogEntry {
         url: String,
         is_pinned: bool,
     },
+    RemoveNode {
+        url: String,
+    },
+    ClearGraph,
+    UpdateNodeUrl {
+        old_url: String,
+        new_url: String,
+    },
 }
 
 #[cfg(test)]
@@ -202,6 +210,49 @@ mod tests {
                 assert_eq!(title.as_str(), "New Title");
             },
             _ => panic!("Expected UpdateNodeTitle variant"),
+        }
+    }
+
+    #[test]
+    fn test_log_entry_remove_node_roundtrip() {
+        let entry = LogEntry::RemoveNode {
+            url: "https://example.com".to_string(),
+        };
+
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
+        let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
+        match archived {
+            ArchivedLogEntry::RemoveNode { url } => {
+                assert_eq!(url.as_str(), "https://example.com");
+            },
+            _ => panic!("Expected RemoveNode variant"),
+        }
+    }
+
+    #[test]
+    fn test_log_entry_clear_graph_roundtrip() {
+        let entry = LogEntry::ClearGraph;
+
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
+        let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
+        assert!(matches!(archived, ArchivedLogEntry::ClearGraph));
+    }
+
+    #[test]
+    fn test_log_entry_update_node_url_roundtrip() {
+        let entry = LogEntry::UpdateNodeUrl {
+            old_url: "https://old.com".to_string(),
+            new_url: "https://new.com".to_string(),
+        };
+
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
+        let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
+        match archived {
+            ArchivedLogEntry::UpdateNodeUrl { old_url, new_url } => {
+                assert_eq!(old_url.as_str(), "https://old.com");
+                assert_eq!(new_url.as_str(), "https://new.com");
+            },
+            _ => panic!("Expected UpdateNodeUrl variant"),
         }
     }
 }

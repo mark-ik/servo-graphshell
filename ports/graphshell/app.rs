@@ -136,6 +136,31 @@ impl GraphBrowserApp {
         }
     }
 
+    /// Create a new graph browser application without persistence (for tests)
+    #[cfg(test)]
+    pub fn new_for_testing() -> Self {
+        let physics_config = PhysicsConfig::default();
+        let viewport_diagonal = 1000.0;
+        let physics = PhysicsEngine::new(physics_config.clone(), viewport_diagonal);
+
+        Self {
+            graph: Graph::new(),
+            physics,
+            physics_worker: None,
+            view: View::Graph,
+            selected_nodes: Vec::new(),
+            webview_to_node: HashMap::new(),
+            node_to_webview: HashMap::new(),
+            is_interacting: false,
+            show_physics_panel: false,
+            fit_to_screen_requested: false,
+            camera: Camera::new(),
+            persistence: None,
+            egui_state: None,
+            egui_state_dirty: true,
+        }
+    }
+
     /// Whether the graph was recovered from persistence (has nodes on startup)
     pub fn has_recovered_graph(&self) -> bool {
         self.graph.node_count() > 0
@@ -458,27 +483,36 @@ impl GraphBrowserApp {
         key
     }
 
-    /// Remove selected nodes and their associated webviews
+    /// Remove selected nodes and their associated webviews.
+    /// Note: actual webview closure must be handled by the caller (gui.rs)
+    /// since we don't hold a window reference.
     pub fn remove_selected_nodes(&mut self) {
         let nodes_to_remove: Vec<NodeKey> = self.selected_nodes.clone();
-        
+
         for node_key in nodes_to_remove {
-            // Unmap and close webview if it exists
+            // Log removal to persistence before removing from graph
+            if let Some(store) = &mut self.persistence {
+                if let Some(node) = self.graph.get_node(node_key) {
+                    store.log_mutation(&LogEntry::RemoveNode {
+                        url: node.url.clone(),
+                    });
+                }
+            }
+
+            // Unmap webview if it exists
             if let Some(webview_id) = self.node_to_webview.get(&node_key).copied() {
                 self.webview_to_node.remove(&webview_id);
                 self.node_to_webview.remove(&node_key);
-                // TODO: Close the actual webview via window.queue_user_interface_command
-                // This needs to be passed through from gui.rs
             }
-            
+
             // Remove from graph
             self.graph.remove_node(node_key);
             self.egui_state_dirty = true;
         }
-        
+
         // Clear selection
         self.selected_nodes.clear();
-        
+
         // Sync to physics worker
         self.sync_graph_to_worker();
     }
@@ -496,6 +530,9 @@ impl GraphBrowserApp {
     /// Webview closure must be handled by the caller (gui.rs) since we don't
     /// hold a reference to the window.
     pub fn clear_graph(&mut self) {
+        if let Some(store) = &mut self.persistence {
+            store.log_mutation(&LogEntry::ClearGraph);
+        }
         self.graph = Graph::new();
         self.selected_nodes.clear();
         self.webview_to_node.clear();
@@ -503,6 +540,20 @@ impl GraphBrowserApp {
         self.view = View::Graph;
         self.egui_state_dirty = true;
         self.sync_graph_to_worker();
+    }
+
+    /// Update a node's URL and log to persistence.
+    /// Returns the old URL, or None if the node doesn't exist.
+    pub fn update_node_url_and_log(&mut self, key: NodeKey, new_url: String) -> Option<String> {
+        let old_url = self.graph.update_node_url(key, new_url.clone())?;
+        if let Some(store) = &mut self.persistence {
+            store.log_mutation(&LogEntry::UpdateNodeUrl {
+                old_url: old_url.clone(),
+                new_url,
+            });
+        }
+        self.egui_state_dirty = true;
+        Some(old_url)
     }
 }
 
@@ -519,7 +570,7 @@ mod tests {
 
     #[test]
     fn test_focus_node_switches_to_detail_view() {
-        let mut app = GraphBrowserApp::new();
+        let mut app = GraphBrowserApp::new_for_testing();
         let node_key = app
             .graph
             .add_node("test".to_string(), Point2D::new(100.0, 100.0));
@@ -537,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_toggle_view_from_graph_to_detail() {
-        let mut app = GraphBrowserApp::new();
+        let mut app = GraphBrowserApp::new_for_testing();
         let node_key = app
             .graph
             .add_node("test".to_string(), Point2D::new(100.0, 100.0));
@@ -552,7 +603,7 @@ mod tests {
 
     #[test]
     fn test_toggle_view_from_detail_to_graph() {
-        let mut app = GraphBrowserApp::new();
+        let mut app = GraphBrowserApp::new_for_testing();
         let node_key = app
             .graph
             .add_node("test".to_string(), Point2D::new(100.0, 100.0));
@@ -568,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_toggle_view_no_nodes() {
-        let mut app = GraphBrowserApp::new();
+        let mut app = GraphBrowserApp::new_for_testing();
 
         // Toggle view with no nodes should stay in graph view
         app.toggle_view();
@@ -577,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_toggle_view_no_selection() {
-        let mut app = GraphBrowserApp::new();
+        let mut app = GraphBrowserApp::new_for_testing();
         let node1 = app
             .graph
             .add_node("node1".to_string(), Point2D::new(100.0, 100.0));
@@ -592,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_request_fit_to_screen() {
-        let mut app = GraphBrowserApp::new();
+        let mut app = GraphBrowserApp::new_for_testing();
 
         // Initially false
         assert!(!app.fit_to_screen_requested);
@@ -608,7 +659,7 @@ mod tests {
 
     #[test]
     fn test_select_node_single() {
-        let mut app = GraphBrowserApp::new();
+        let mut app = GraphBrowserApp::new_for_testing();
         let key = app
             .graph
             .add_node("test".to_string(), Point2D::new(0.0, 0.0));
@@ -622,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_select_node_multi() {
-        let mut app = GraphBrowserApp::new();
+        let mut app = GraphBrowserApp::new_for_testing();
         let key1 = app
             .graph
             .add_node("a".to_string(), Point2D::new(0.0, 0.0));

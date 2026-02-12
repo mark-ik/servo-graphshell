@@ -156,7 +156,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 **Implementation** (`persistence/mod.rs` + `types.rs`, 636 lines):
 
 - **fjall v3**: Append-only operation log — every mutation logged (AddNode, AddEdge, UpdateTitle, PinNode)
-- **redb v2**: Periodic snapshots — full graph serialization every 5 minutes
+- **redb v3**: Periodic snapshots — full graph serialization every 5 minutes
 - **rkyv 0.8**: Zero-copy serialization for both log entries and snapshots
 - Startup recovery: load latest redb snapshot → replay fjall log entries since snapshot timestamp
 - Aligned data handling: redb bytes aren't aligned for rkyv; copy to `AlignedVec` before deserializing

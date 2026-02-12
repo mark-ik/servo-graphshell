@@ -5,7 +5,7 @@ This guide covers building Graphshell Graph Browser on Windows, macOS, and Linux
 Graphshell is built on Servo, a modern parallel browser engine written in Rust. It uses the `mach` build system (a Python wrapper around Cargo) to manage dependencies, compilation, and testing.
 
 **Last Verified**: February 9, 2026 (Rust 1.91.0, Servo main)  
-**Status**: Foundation implemented (~3,500 LOC), builds successfully  
+**Status**: Core browsing graph functional (~4,500 LOC), builds successfully  
 **Port Location**: `c:\Users\mark_\Code\servo\ports\graphshell\`
 
 ---
@@ -180,14 +180,14 @@ sudo dnf install -y python3 git curl gcc-c++ pkg-config \
 
 5. **Build:**
    ```cmd
-   .\mach build -r graphshell-graph
+   .\mach build -r graphshell
    ```
 
 **Running:**
 ```cmd
-.\target\release\graphshell-graph.exe https://example.com
+.\target\release\graphshell.exe https://example.com
 # or
-.\mach run -r graphshell-graph -- https://example.com
+.\mach run -r graphshell -- https://example.com
 ```
 
 **Troubleshooting:**
@@ -208,7 +208,7 @@ git clone https://github.com/servo/servo.git
 cd servo
 nix-shell shell.nix
 ./mach bootstrap
-./mach build -r graphshell-graph
+./mach build -r graphshell
 ```
 
 The `shell.nix` file configures all dependencies automatically.
@@ -245,9 +245,9 @@ The `mach build` command supports different optimization levels:
 
 | Profile | Command | Build Time | Runtime Speed | Use Case |
 |---------|---------|-----------|----------------|----------|
-| **debug** | `./mach build -d graphshell-graph` | 5-10 min | Slow | Local development, debugging |
-| **release** | `./mach build -r graphshell-graph` | 15-30 min | Fast | Testing, benchmarking |
-| **production** | `./mach build --prod graphshell-graph` | 20-40 min | Fastest | Release builds, distribution |
+| **debug** | `./mach build -d graphshell` | 5-10 min | Slow | Local development, debugging |
+| **release** | `./mach build -r graphshell` | 15-30 min | Fast | Testing, benchmarking |
+| **production** | `./mach build --prod graphshell` | 20-40 min | Fastest | Release builds, distribution |
 
 **Recommendation:** Use `-r` (release) for development and testing.
 
@@ -260,10 +260,10 @@ The `mach build` command supports different optimization levels:
 ./mach clean
 
 # Build specific crate
-./mach build -r graphshell-graph
+./mach build -r graphshell
 
 # Build with all features enabled
-./mach build -r graphshell-graph -f all
+./mach build -r graphshell -f all
 
 # Build with Address Sanitizer (debug builds only)
 ./mach build --with-asan
@@ -283,7 +283,7 @@ After a successful build, run with:
 
 ```bash
 # Direct execution
-./target/release/graphshell-graph https://example.com
+./target/release/graphshell https://example.com
 
 # Using mach (recommended)
 ./mach run -r -- https://example.com
@@ -292,12 +292,12 @@ After a successful build, run with:
 ./mach run -d -- https://example.com
 
 # With specific options
-./mach run -r graphshell-graph -- --help
+./mach run -r graphshell -- --help
 ```
 
 ### First Run
 
-1. **Check that graphshell-graph launches** and opens a window
+1. **Check that graphshell launches** and opens a window
 2. **Type a URL** in the address bar (e.g., `https://example.com`)
 3. **Press Enter** to load the page
 4. **Test navigation** by clicking links
@@ -314,19 +314,19 @@ After a successful build, run with:
 nano components/servo/lib.rs
 
 # Build (very fast for incremental changes)
-./mach build -r graphshell-graph
+./mach build -r graphshell
 
 # Run and test
-./mach run -r graphshell-graph -- https://example.com
+./mach run -r graphshell -- https://example.com
 
 # Check code formatting
 ./mach fmt
 
 # Run lints
-./mach clippy graphshell-graph
+./mach clippy graphshell
 
 # Run tests
-./mach test-unit graphshell-graph
+./mach test-unit graphshell
 ```
 
 ### Faster Iteration
@@ -334,15 +334,15 @@ nano components/servo/lib.rs
 Use **debug builds** during development (faster compilation, slower execution):
 
 ```bash
-./mach build -d graphshell-graph    # ~3-5 min incremental
-./mach run -d graphshell-graph -- https://example.com
+./mach build -d graphshell    # ~3-5 min incremental
+./mach run -d graphshell -- https://example.com
 ```
 
 Switch to **release builds** when benchmarking or preparing to ship:
 
 ```bash
-./mach build -r graphshell-graph
-./mach run -r graphshell-graph -- https://example.com
+./mach build -r graphshell
+./mach run -r graphshell -- https://example.com
 ```
 
 ---
@@ -381,7 +381,7 @@ rustup toolchain install 1.91.0
 
 **Problem: "Port already in use"**
 - Graphshell may be trying to bind to a reserved port
-- Try: `./mach run -r graphshell-graph -- --help` to see options
+- Try: `./mach run -r graphshell -- --help` to see options
 
 ---
 
@@ -440,11 +440,11 @@ Once Graphshell builds successfully:
 
 1. **Explore the architecture**: Read [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)
 2. **Understand the design**: See [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md)
-3. **Run tests**: `./mach test-unit graphshell-graph`
+3. **Run tests**: `./mach test-unit graphshell`
 4. **Check code quality**:
    ```bash
-   ./mach fmt --check graphshell-graph
-   ./mach clippy graphshell-graph
+   ./mach fmt --check graphshell
+   ./mach clippy graphshell
    ```
 5. **Start implementing features**: Refer to [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) for feature targets
 
