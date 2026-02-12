@@ -189,6 +189,7 @@ impl HeadedWindow {
             event_loop_proxy,
             rendering_context.clone(),
             initial_url,
+            servoshell_preferences.graph_data_dir.clone(),
         ));
 
         debug!("Created window {:?}", winit_window.id());

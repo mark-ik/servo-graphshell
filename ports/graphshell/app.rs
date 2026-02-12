@@ -5,6 +5,7 @@
 //! Application state and view management for the graph browser.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::graph::{Graph, NodeKey};
 use crate::graph::egui_adapter::EguiGraphState;
@@ -74,11 +75,22 @@ pub struct GraphBrowserApp {
     webview_to_node: HashMap<WebViewId, NodeKey>,
     node_to_webview: HashMap<NodeKey, WebViewId>,
 
+    /// Nodes that had webviews before switching to graph view (for restoration).
+    /// Managed by the webview_controller module.
+    pub(crate) active_webview_nodes: Vec<NodeKey>,
+
+    /// Counter for unique placeholder URLs (about:blank#1, about:blank#2, ...).
+    /// Prevents `url_to_node` clobbering when pressing N multiple times.
+    next_placeholder_id: u32,
+
     /// True while the user is actively interacting (drag/pan) with the graph
-    is_interacting: bool,
+    pub(crate) is_interacting: bool,
 
     /// Whether the physics config panel is open
     pub show_physics_panel: bool,
+
+    /// Whether the keyboard shortcut help panel is open
+    pub show_help_panel: bool,
 
     /// One-shot flag: fit graph to screen on next frame (triggered by 'C' key)
     pub fit_to_screen_requested: bool,
@@ -99,6 +111,11 @@ pub struct GraphBrowserApp {
 impl GraphBrowserApp {
     /// Create a new graph browser application
     pub fn new() -> Self {
+        Self::new_from_dir(GraphStore::default_data_dir())
+    }
+
+    /// Create a new graph browser application using a specific persistence directory.
+    pub fn new_from_dir(data_dir: PathBuf) -> Self {
         let physics_config = PhysicsConfig::default();
 
         // Default viewport diagonal (will be updated on first frame)
@@ -107,7 +124,7 @@ impl GraphBrowserApp {
         let physics_worker = Some(PhysicsWorker::new(physics_config, viewport_diagonal));
 
         // Try to open persistence store and recover graph
-        let (graph, persistence) = match GraphStore::open(GraphStore::default_data_dir()) {
+        let (graph, persistence) = match GraphStore::open(data_dir) {
             Ok(store) => {
                 let graph = store.recover().unwrap_or_else(Graph::new);
                 (graph, Some(store))
@@ -118,6 +135,9 @@ impl GraphBrowserApp {
             },
         };
 
+        // Scan recovered graph for existing placeholder IDs to avoid collisions
+        let next_placeholder_id = Self::scan_max_placeholder_id(&graph);
+
         Self {
             graph,
             physics,
@@ -126,8 +146,11 @@ impl GraphBrowserApp {
             selected_nodes: Vec::new(),
             webview_to_node: HashMap::new(),
             node_to_webview: HashMap::new(),
+            active_webview_nodes: Vec::new(),
+            next_placeholder_id,
             is_interacting: false,
             show_physics_panel: false,
+            show_help_panel: false,
             fit_to_screen_requested: false,
             camera: Camera::new(),
             persistence,
@@ -151,8 +174,11 @@ impl GraphBrowserApp {
             selected_nodes: Vec::new(),
             webview_to_node: HashMap::new(),
             node_to_webview: HashMap::new(),
+            active_webview_nodes: Vec::new(),
+            next_placeholder_id: 0,
             is_interacting: false,
             show_physics_panel: false,
+            show_help_panel: false,
             fit_to_screen_requested: false,
             camera: Camera::new(),
             persistence: None,
@@ -424,6 +450,11 @@ impl GraphBrowserApp {
         self.show_physics_panel = !self.show_physics_panel;
     }
 
+    /// Toggle keyboard shortcut help panel visibility
+    pub fn toggle_help_panel(&mut self) {
+        self.show_help_panel = !self.show_help_panel;
+    }
+
     /// Promote a node to Active lifecycle (mark as needing webview)
     pub fn promote_node_to_active(&mut self, node_key: NodeKey) {
         use crate::graph::NodeLifecycle;
@@ -445,35 +476,56 @@ impl GraphBrowserApp {
         }
     }
 
+    /// Scan graph for existing `about:blank#N` placeholder URLs and return
+    /// the next available ID (max found + 1, or 0 if none exist).
+    fn scan_max_placeholder_id(graph: &Graph) -> u32 {
+        let mut max_id = 0u32;
+        for (_, node) in graph.nodes() {
+            if let Some(fragment) = node.url.strip_prefix("about:blank#") {
+                if let Ok(id) = fragment.parse::<u32>() {
+                    max_id = max_id.max(id + 1);
+                }
+            }
+        }
+        max_id
+    }
+
+    /// Generate a unique placeholder URL for a new node.
+    fn next_placeholder_url(&mut self) -> String {
+        let url = format!("about:blank#{}", self.next_placeholder_id);
+        self.next_placeholder_id += 1;
+        url
+    }
+
     /// Create a new node near the center of the graph (or at origin if graph is empty)
     pub fn create_new_node_near_center(&mut self) -> NodeKey {
         use euclid::default::Point2D;
         use rand::Rng;
-        
+
         // Calculate approximate center of existing nodes
         let (center_x, center_y) = if self.graph.node_count() > 0 {
             let mut sum_x = 0.0;
             let mut sum_y = 0.0;
             let mut count = 0;
-            
+
             for (_, node) in self.graph.nodes() {
                 sum_x += node.position.x;
                 sum_y += node.position.y;
                 count += 1;
             }
-            
+
             (sum_x / count as f32, sum_y / count as f32)
         } else {
             (400.0, 300.0) // Default center if no nodes
         };
-        
+
         // Add random offset to avoid stacking directly on center
         let mut rng = rand::thread_rng();
         let offset_x = rng.gen_range(-100.0..100.0);
         let offset_y = rng.gen_range(-100.0..100.0);
-        
+
         let position = Point2D::new(center_x + offset_x, center_y + offset_y);
-        let placeholder_url = "about:blank".to_string();
+        let placeholder_url = self.next_placeholder_url();
         
         let key = self.add_node_and_sync(placeholder_url, position);
         
@@ -542,6 +594,24 @@ impl GraphBrowserApp {
         self.sync_graph_to_worker();
     }
 
+    /// Clear the graph in memory and wipe all persisted graph data.
+    pub fn clear_graph_and_persistence(&mut self) {
+        if let Some(store) = &mut self.persistence {
+            if let Err(e) = store.clear_all() {
+                warn!("Failed to clear persisted graph data: {e}");
+            }
+        }
+        self.graph = Graph::new();
+        self.selected_nodes.clear();
+        self.webview_to_node.clear();
+        self.node_to_webview.clear();
+        self.active_webview_nodes.clear();
+        self.next_placeholder_id = 0;
+        self.view = View::Graph;
+        self.egui_state_dirty = true;
+        self.sync_graph_to_worker();
+    }
+
     /// Update a node's URL and log to persistence.
     /// Returns the old URL, or None if the node doesn't exist.
     pub fn update_node_url_and_log(&mut self, key: NodeKey, new_url: String) -> Option<String> {
@@ -567,6 +637,22 @@ impl Default for GraphBrowserApp {
 mod tests {
     use super::*;
     use euclid::default::Point2D;
+    use tempfile::TempDir;
+
+    /// Create a unique WebViewId for testing.
+    /// Ensures the pipeline namespace is installed on the current thread.
+    fn test_webview_id() -> servo::WebViewId {
+        thread_local! {
+            static NS_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        NS_INSTALLED.with(|cell| {
+            if !cell.get() {
+                base::id::PipelineNamespace::install(base::id::PipelineNamespaceId(42));
+                cell.set(true);
+            }
+        });
+        servo::WebViewId::new(base::id::PainterId::next())
+    }
 
     #[test]
     fn test_focus_node_switches_to_detail_view() {
@@ -725,5 +811,390 @@ mod tests {
         let cam = Camera::new();
         assert_eq!(cam.clamp(0.1), 0.1);
         assert_eq!(cam.clamp(10.0), 10.0);
+    }
+
+    #[test]
+    fn test_create_multiple_placeholder_nodes_unique_urls() {
+        let mut app = GraphBrowserApp::new_for_testing();
+
+        let k1 = app.create_new_node_near_center();
+        let k2 = app.create_new_node_near_center();
+        let k3 = app.create_new_node_near_center();
+
+        // All three nodes must have distinct URLs
+        let url1 = app.graph.get_node(k1).unwrap().url.clone();
+        let url2 = app.graph.get_node(k2).unwrap().url.clone();
+        let url3 = app.graph.get_node(k3).unwrap().url.clone();
+
+        assert_ne!(url1, url2);
+        assert_ne!(url2, url3);
+        assert_ne!(url1, url3);
+
+        // All URLs start with about:blank#
+        assert!(url1.starts_with("about:blank#"));
+        assert!(url2.starts_with("about:blank#"));
+        assert!(url3.starts_with("about:blank#"));
+
+        // url_to_node should have 3 distinct entries
+        assert_eq!(app.graph.node_count(), 3);
+        assert!(app.graph.get_node_by_url(&url1).is_some());
+        assert!(app.graph.get_node_by_url(&url2).is_some());
+        assert!(app.graph.get_node_by_url(&url3).is_some());
+    }
+
+    #[test]
+    fn test_placeholder_id_scan_on_recovery() {
+        let mut graph = Graph::new();
+        graph.add_node("about:blank#5".to_string(), Point2D::new(0.0, 0.0));
+        graph.add_node("about:blank#2".to_string(), Point2D::new(100.0, 0.0));
+        graph.add_node("https://example.com".to_string(), Point2D::new(200.0, 0.0));
+
+        let next_id = GraphBrowserApp::scan_max_placeholder_id(&graph);
+        // Max is 5, so next should be 6
+        assert_eq!(next_id, 6);
+    }
+
+    #[test]
+    fn test_placeholder_id_scan_empty_graph() {
+        let graph = Graph::new();
+        assert_eq!(GraphBrowserApp::scan_max_placeholder_id(&graph), 0);
+    }
+
+    // --- TEST-1: remove_selected_nodes ---
+
+    #[test]
+    fn test_remove_selected_nodes_single() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let _k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+
+        app.select_node(k1, false);
+        app.remove_selected_nodes();
+
+        assert_eq!(app.graph.node_count(), 1);
+        assert!(app.graph.get_node(k1).is_none());
+        assert!(app.selected_nodes.is_empty());
+    }
+
+    #[test]
+    fn test_remove_selected_nodes_multi() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+        let k3 = app.graph.add_node("c".to_string(), Point2D::new(200.0, 0.0));
+
+        app.select_node(k1, false);
+        app.select_node(k2, true);
+        app.remove_selected_nodes();
+
+        assert_eq!(app.graph.node_count(), 1);
+        assert!(app.graph.get_node(k3).is_some());
+        assert!(app.selected_nodes.is_empty());
+    }
+
+    #[test]
+    fn test_remove_selected_nodes_empty_selection() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+
+        // No selection — should be a no-op
+        app.remove_selected_nodes();
+        assert_eq!(app.graph.node_count(), 1);
+    }
+
+    #[test]
+    fn test_remove_selected_nodes_clears_webview_mapping() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+
+        // Simulate a webview mapping
+        let fake_wv_id = test_webview_id();
+        app.map_webview_to_node(fake_wv_id, k1);
+        assert!(app.get_node_for_webview(fake_wv_id).is_some());
+
+        app.select_node(k1, false);
+        app.remove_selected_nodes();
+
+        // Mapping should be cleaned up
+        assert!(app.get_node_for_webview(fake_wv_id).is_none());
+        assert!(app.get_webview_for_node(k1).is_none());
+    }
+
+    // --- TEST-1: clear_graph ---
+
+    #[test]
+    fn test_clear_graph_resets_everything() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+
+        app.select_node(k1, false);
+        app.focus_node(k2); // switches to Detail view
+
+        let fake_wv_id = test_webview_id();
+        app.map_webview_to_node(fake_wv_id, k1);
+
+        app.clear_graph();
+
+        assert_eq!(app.graph.node_count(), 0);
+        assert!(app.selected_nodes.is_empty());
+        assert!(app.get_node_for_webview(fake_wv_id).is_none());
+        assert!(matches!(app.view, View::Graph));
+    }
+
+    // --- TEST-1: create_new_node_near_center ---
+
+    #[test]
+    fn test_create_new_node_near_center_empty_graph() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app.create_new_node_near_center();
+
+        assert_eq!(app.graph.node_count(), 1);
+        assert!(app.selected_nodes.contains(&key));
+
+        let node = app.graph.get_node(key).unwrap();
+        assert!(node.url.starts_with("about:blank#"));
+    }
+
+    #[test]
+    fn test_create_new_node_near_center_selects_node() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let k1 = app.graph.add_node("existing".to_string(), Point2D::new(0.0, 0.0));
+        app.select_node(k1, false);
+
+        let k2 = app.create_new_node_near_center();
+
+        // New node should be selected, old one deselected
+        assert_eq!(app.selected_nodes.len(), 1);
+        assert!(app.selected_nodes.contains(&k2));
+    }
+
+    // --- TEST-1: demote/promote lifecycle ---
+
+    #[test]
+    fn test_promote_and_demote_node_lifecycle() {
+        use crate::graph::NodeLifecycle;
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+
+        // Default lifecycle is Cold
+        assert!(matches!(
+            app.graph.get_node(key).unwrap().lifecycle,
+            NodeLifecycle::Cold
+        ));
+
+        app.promote_node_to_active(key);
+        assert!(matches!(
+            app.graph.get_node(key).unwrap().lifecycle,
+            NodeLifecycle::Active
+        ));
+
+        app.demote_node_to_cold(key);
+        assert!(matches!(
+            app.graph.get_node(key).unwrap().lifecycle,
+            NodeLifecycle::Cold
+        ));
+    }
+
+    #[test]
+    fn test_demote_clears_webview_mapping() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let fake_wv_id = test_webview_id();
+
+        app.map_webview_to_node(fake_wv_id, key);
+        assert!(app.get_webview_for_node(key).is_some());
+
+        app.demote_node_to_cold(key);
+        assert!(app.get_webview_for_node(key).is_none());
+        assert!(app.get_node_for_webview(fake_wv_id).is_none());
+    }
+
+    // --- TEST-1: webview mapping ---
+
+    #[test]
+    fn test_webview_mapping_bidirectional() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let wv_id = test_webview_id();
+
+        app.map_webview_to_node(wv_id, key);
+
+        assert_eq!(app.get_node_for_webview(wv_id), Some(key));
+        assert_eq!(app.get_webview_for_node(key), Some(wv_id));
+    }
+
+    #[test]
+    fn test_unmap_webview() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let wv_id = test_webview_id();
+
+        app.map_webview_to_node(wv_id, key);
+        let unmapped_key = app.unmap_webview(wv_id);
+
+        assert_eq!(unmapped_key, Some(key));
+        assert!(app.get_node_for_webview(wv_id).is_none());
+        assert!(app.get_webview_for_node(key).is_none());
+    }
+
+    #[test]
+    fn test_unmap_nonexistent_webview() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let wv_id = test_webview_id();
+
+        assert_eq!(app.unmap_webview(wv_id), None);
+    }
+
+    #[test]
+    fn test_webview_node_mappings_iterator() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+        let wv1 = test_webview_id();
+        let wv2 = test_webview_id();
+
+        app.map_webview_to_node(wv1, k1);
+        app.map_webview_to_node(wv2, k2);
+
+        let mappings: Vec<_> = app.webview_node_mappings().collect();
+        assert_eq!(mappings.len(), 2);
+    }
+
+    // --- TEST-1: get_single_selected_node ---
+
+    #[test]
+    fn test_get_single_selected_node_one() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        app.select_node(key, false);
+
+        assert_eq!(app.get_single_selected_node(), Some(key));
+    }
+
+    #[test]
+    fn test_get_single_selected_node_none() {
+        let app = GraphBrowserApp::new_for_testing();
+        assert_eq!(app.get_single_selected_node(), None);
+    }
+
+    #[test]
+    fn test_get_single_selected_node_multi() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+        app.select_node(k1, false);
+        app.select_node(k2, true);
+
+        assert_eq!(app.get_single_selected_node(), None);
+    }
+
+    // --- TEST-1: update_node_url_and_log ---
+
+    #[test]
+    fn test_update_node_url_and_log() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app.graph.add_node("old-url".to_string(), Point2D::new(0.0, 0.0));
+
+        let old = app.update_node_url_and_log(key, "new-url".to_string());
+
+        assert_eq!(old, Some("old-url".to_string()));
+        assert_eq!(app.graph.get_node(key).unwrap().url, "new-url");
+        // url_to_node should be updated
+        assert!(app.graph.get_node_by_url("new-url").is_some());
+        assert!(app.graph.get_node_by_url("old-url").is_none());
+    }
+
+    #[test]
+    fn test_update_node_url_nonexistent() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let fake_key = NodeKey::new(999);
+
+        assert_eq!(app.update_node_url_and_log(fake_key, "x".to_string()), None);
+    }
+
+    #[test]
+    fn test_new_from_dir_recovers_logged_graph() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        {
+            let mut store = GraphStore::open(path.clone()).unwrap();
+            store.log_mutation(&LogEntry::AddNode {
+                url: "https://a.com".to_string(),
+                position_x: 10.0,
+                position_y: 20.0,
+            });
+            store.log_mutation(&LogEntry::AddNode {
+                url: "https://b.com".to_string(),
+                position_x: 30.0,
+                position_y: 40.0,
+            });
+            store.log_mutation(&LogEntry::AddEdge {
+                from_url: "https://a.com".to_string(),
+                to_url: "https://b.com".to_string(),
+                edge_type: PersistedEdgeType::Hyperlink,
+            });
+        }
+
+        let app = GraphBrowserApp::new_from_dir(path);
+        assert!(app.has_recovered_graph());
+        assert_eq!(app.graph.node_count(), 2);
+        assert_eq!(app.graph.edge_count(), 1);
+        assert!(app.graph.get_node_by_url("https://a.com").is_some());
+        assert!(app.graph.get_node_by_url("https://b.com").is_some());
+    }
+
+    #[test]
+    fn test_new_from_dir_scans_placeholder_ids_from_recovery() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        {
+            let mut store = GraphStore::open(path.clone()).unwrap();
+            store.log_mutation(&LogEntry::AddNode {
+                url: "about:blank#5".to_string(),
+                position_x: 0.0,
+                position_y: 0.0,
+            });
+        }
+
+        let mut app = GraphBrowserApp::new_from_dir(path);
+        let key = app.create_new_node_near_center();
+        let node = app.graph.get_node(key).unwrap();
+        assert_eq!(node.url, "about:blank#6");
+    }
+
+    #[test]
+    fn test_clear_graph_and_persistence_in_memory_reset() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
+        app.select_node(key, false);
+        app.focus_node(key);
+
+        app.clear_graph_and_persistence();
+
+        assert_eq!(app.graph.node_count(), 0);
+        assert!(app.selected_nodes.is_empty());
+        assert!(matches!(app.view, View::Graph));
+    }
+
+    #[test]
+    fn test_clear_graph_and_persistence_wipes_store() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        {
+            let mut app = GraphBrowserApp::new_from_dir(path.clone());
+            app.add_node_and_sync("https://persisted.com".to_string(), Point2D::new(1.0, 2.0));
+            app.take_snapshot();
+            app.clear_graph_and_persistence();
+        }
+
+        let recovered = GraphBrowserApp::new_from_dir(path);
+        assert!(!recovered.has_recovered_graph());
+        assert_eq!(recovered.graph.node_count(), 0);
     }
 }

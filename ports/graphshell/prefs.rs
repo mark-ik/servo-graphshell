@@ -80,6 +80,8 @@ pub(crate) struct ServoShellPreferences {
     /// Where to load userscripts from, if any.
     /// and if the option isn't passed userscripts won't be loaded.
     pub userscripts_directory: Option<PathBuf>,
+    /// Override for GraphShell graph persistence directory.
+    pub graph_data_dir: Option<PathBuf>,
     /// `None` to disable WebDriver or `Some` with a port number to start a server to listen to
     /// remote WebDriver commands.
     pub webdriver_port: Cell<Option<u16>>,
@@ -111,6 +113,7 @@ impl Default for ServoShellPreferences {
             output_image_path: None,
             exit_after_stable_image: false,
             userscripts_directory: None,
+            graph_data_dir: None,
             webdriver_port: Cell::new(None),
             #[cfg(target_env = "ohos")]
             log_filter: None,
@@ -385,6 +388,10 @@ struct CmdArgs {
     ///  Config directory following xdg spec on linux platform.
     #[bpaf(argument("~/.config/servo"))]
     config_dir: Option<PathBuf>,
+
+    /// Override GraphShell graph persistence directory.
+    #[bpaf(long("graph-data-dir"), argument("~/.config/graphshell/graphs"))]
+    graph_data_dir: Option<PathBuf>,
 
     ///
     ///  Run as a content process and connect to the given pipe.
@@ -693,6 +700,7 @@ fn parse_arguments_helper(args_without_binary: Args) -> ArgumentParsingResult {
         output_image_path: cmd_args.output.map(|p| p.to_string_lossy().into_owned()),
         exit_after_stable_image: cmd_args.exit,
         userscripts_directory: cmd_args.userscripts,
+        graph_data_dir: cmd_args.graph_data_dir,
         experimental_preferences_enabled: cmd_args.enable_experimental_web_platform_features,
         #[cfg(target_env = "ohos")]
         log_filter: cmd_args.log_filter.or_else(|| {
@@ -864,5 +872,13 @@ fn test_servoshell_cmd() {
             .certificate_path
             .unwrap(),
         String::from("/tmp/test")
+    );
+
+    assert_eq!(
+        test_parse("--graph-data-dir=graph-fixtures")
+            .2
+            .graph_data_dir
+            .unwrap(),
+        PathBuf::from("graph-fixtures")
     );
 }

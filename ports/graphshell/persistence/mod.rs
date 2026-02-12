@@ -22,8 +22,8 @@ const SNAPSHOT_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition
 
 /// Persistent graph store backed by fjall (log) + redb (snapshots)
 pub struct GraphStore {
-    #[allow(dead_code)]
-    db: fjall::Database,
+    /// Kept alive so the Keyspace borrow remains valid (fjall requires it).
+    _db: fjall::Database,
     log_keyspace: fjall::Keyspace,
     snapshot_db: redb::Database,
     log_sequence: u64,
@@ -55,7 +55,7 @@ impl GraphStore {
         let log_sequence = Self::find_max_sequence(&log_keyspace) + 1;
 
         Ok(Self {
-            db,
+            _db: db,
             log_keyspace,
             snapshot_db,
             log_sequence,
@@ -146,6 +146,29 @@ impl GraphStore {
         if self.last_snapshot.elapsed() >= self.snapshot_interval {
             self.take_snapshot(graph);
         }
+    }
+
+    /// Clear all persisted graph data (snapshot + mutation log).
+    pub fn clear_all(&mut self) -> Result<(), GraphStoreError> {
+        let write_txn = self
+            .snapshot_db
+            .begin_write()
+            .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+        {
+            let mut table = write_txn
+                .open_table(SNAPSHOT_TABLE)
+                .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+            table
+                .remove("latest")
+                .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+        }
+        write_txn
+            .commit()
+            .map_err(|e| GraphStoreError::Redb(format!("{e}")))?;
+
+        self.clear_log();
+        self.last_snapshot = Instant::now();
+        Ok(())
     }
 
     fn load_snapshot(&self) -> Option<GraphSnapshot> {
@@ -543,5 +566,29 @@ mod tests {
 
         let graph = store.recover().unwrap();
         assert_eq!(graph.node_count(), 1);
+    }
+
+    #[test]
+    fn test_clear_all_removes_snapshot_and_log() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        {
+            let mut store = GraphStore::open(path.clone()).unwrap();
+            let mut graph = Graph::new();
+            graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
+            store.take_snapshot(&graph);
+            store.log_mutation(&LogEntry::AddNode {
+                url: "https://b.com".to_string(),
+                position_x: 10.0,
+                position_y: 20.0,
+            });
+            store.clear_all().unwrap();
+        }
+
+        {
+            let store = GraphStore::open(path).unwrap();
+            assert!(store.recover().is_none());
+        }
     }
 }

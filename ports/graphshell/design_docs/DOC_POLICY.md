@@ -84,6 +84,8 @@ Checklists, task lists, and implementation planning documents should be organize
 
 ### Workflow Documentation Rule
 
+For AI assistants: store documentation (including memories, instructions, plans, etc.) in doc_policy per this file's rules. Refer to doc_policy for context when needed. This also means that the content of agent-specific instruction folders should exist in doc_policy (such as .claude folders).
+
 When asked to do a project (like implementing a feature, or trying to accomplish something documented as a planned task in design_docs) that requires changing the codebase (not the docs), create a markdown file in the relevant design_docs directory with the current date, a keyword related to the task (such as the feature being implemented), and the suffix _plan. Include in this file three sections:
 
 - (keyword) Plan: track phases and progress

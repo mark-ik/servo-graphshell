@@ -571,4 +571,92 @@ mod tests {
         assert!(has_hyperlink);
         assert!(has_history);
     }
+
+    // --- TEST-3: from_snapshot edge cases ---
+
+    #[test]
+    fn test_snapshot_edge_with_missing_url_is_dropped() {
+        use crate::persistence::types::{GraphSnapshot, PersistedNode, PersistedEdge, PersistedEdgeType};
+
+        let snapshot = GraphSnapshot {
+            nodes: vec![
+                PersistedNode {
+                    url: "https://a.com".to_string(),
+                    title: String::new(),
+                    position_x: 0.0,
+                    position_y: 0.0,
+                    is_pinned: false,
+                },
+            ],
+            edges: vec![
+                PersistedEdge {
+                    from_url: "https://a.com".to_string(),
+                    to_url: "https://nonexistent.com".to_string(),
+                    edge_type: PersistedEdgeType::Hyperlink,
+                },
+            ],
+            timestamp_secs: 0,
+        };
+
+        let graph = Graph::from_snapshot(&snapshot);
+
+        // Node should be restored, edge should be silently dropped
+        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_snapshot_duplicate_urls_last_wins() {
+        use crate::persistence::types::{GraphSnapshot, PersistedNode};
+
+        let snapshot = GraphSnapshot {
+            nodes: vec![
+                PersistedNode {
+                    url: "https://same.com".to_string(),
+                    title: "First".to_string(),
+                    position_x: 0.0,
+                    position_y: 0.0,
+                    is_pinned: false,
+                },
+                PersistedNode {
+                    url: "https://same.com".to_string(),
+                    title: "Second".to_string(),
+                    position_x: 100.0,
+                    position_y: 100.0,
+                    is_pinned: false,
+                },
+            ],
+            edges: vec![],
+            timestamp_secs: 0,
+        };
+
+        let graph = Graph::from_snapshot(&snapshot);
+
+        // Both nodes are created (StableGraph allows this), but url_to_node
+        // points to the second one (last insert wins)
+        assert_eq!(graph.node_count(), 2);
+        let (_, node) = graph.get_node_by_url("https://same.com").unwrap();
+        assert_eq!(node.title, "Second");
+    }
+
+    #[test]
+    fn test_update_node_url() {
+        let mut graph = Graph::new();
+        let key = graph.add_node("old".to_string(), Point2D::new(0.0, 0.0));
+
+        let old = graph.update_node_url(key, "new".to_string());
+
+        assert_eq!(old, Some("old".to_string()));
+        assert_eq!(graph.get_node(key).unwrap().url, "new");
+        assert!(graph.get_node_by_url("new").is_some());
+        assert!(graph.get_node_by_url("old").is_none());
+    }
+
+    #[test]
+    fn test_update_node_url_nonexistent() {
+        let mut graph = Graph::new();
+        let fake_key = NodeKey::new(999);
+
+        assert_eq!(graph.update_node_url(fake_key, "x".to_string()), None);
+    }
 }

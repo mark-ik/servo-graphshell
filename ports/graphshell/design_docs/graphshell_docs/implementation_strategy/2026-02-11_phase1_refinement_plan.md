@@ -87,5 +87,14 @@ Command palette, trait-based graph/UI decoupling, arrow-key navigation, screen r
 - Completed: Plan creation and approval
 - Completed: Step 1 (BUG-1 + SIMP-1) — created `util.rs` with char-safe `truncate_with_ellipsis`, deleted both old functions, 7 new tests. Fixed pre-existing test isolation bug (`new_for_testing()`).
 - Completed: Step 2 (BUG-2) — added `RemoveNode`, `ClearGraph`, `UpdateNodeUrl` LogEntry variants + replay logic. Wired `log_mutation` into `remove_selected_nodes()` and `clear_graph()`. Added `Graph::update_node_url()` and `app.update_node_url_and_log()`. 8 new tests.
-- Test count: 80 -> 95 (all passing)
-- Next: Step 3 (SIMP-2: webview controller extraction)
+- Completed: Step 3 (SIMP-2) — extracted `desktop/webview_controller.rs` (299 lines) from gui.rs. Four functions: `manage_lifecycle`, `sync_to_graph`, `handle_address_bar_submit`, `close_webviews_for_nodes`. Moved `nodes_with_webviews` to `GraphBrowserApp` as `active_webview_nodes`. gui.rs: 1090 -> 801 lines.
+- Completed: Step 4 (BUG-3 + BUG-4) — `handle_address_bar_submit` now uses `update_node_url_and_log` (persistence + url_to_node consistency) and pre-seeds `previous_urls` to prevent phantom nodes.
+- Completed: Step 5 (BUG-5 + BUG-6) — BUG-5 fixed by SIMP-2 state move (active_webview_nodes persists in GraphBrowserApp). BUG-6 fixed with unique placeholder URLs (`about:blank#N` via counter), scan-on-recovery for collision avoidance. 2 new tests.
+- Test count: 80 -> 97 (all passing)
+- Completed: Step 6 (TEST-1/2/3) — 25 tests for app.rs (remove_selected_nodes, clear_graph, create_new_node, promote/demote, webview mappings, get_single_selected_node, update_node_url_and_log, placeholder uniqueness). 4 tests for graph/mod.rs (snapshot edge cases, update_node_url). Added `base` dev-dependency + `test_webview_id()` helper for PipelineNamespace init. Test count: 97 -> 120.
+- Completed: Step 7 (A11Y-1 + A11Y-2) — Cold node color brightened (100,100,120 → 140,140,165) for ~3.5:1 contrast. Node radii increased: cold 10→15 (30px), active 15→18 (36px).
+- Completed: Step 8 (UI-1/2/3) — Address bar now shows selected node URL in graph view. `take_snapshot()` wired to `Gui::drop()`. Enter detection uses `location_submitted` flag to decouple `has_focus()+key_pressed` from `lost_focus()`.
+- Completed: Step 9 (SIMP-3/4) — `sync_to_graph` now calls `app.select_node()` instead of manual selection loop (~8 lines removed). `db` field renamed to `_db` with doc comment explaining fjall borrow requirement.
+- Completed: Step 10 (TEST-4/5) — Extracted `KeyboardActions` struct + `apply_actions()` from `handle_keyboard` (8 input tests). Extracted `GraphAction` enum + `apply_graph_actions()` from `process_events` (8 render tests). Test count: 120 -> 136.
+- Completed: Step 11 (A11Y-3) — Added `show_help_panel` toggle, `F1`/`?` binding, `render_help_panel()` with egui Grid listing 12 shortcuts. Updated graph overlay hint text. 1 new test.
+- **Phase 1 Refinement COMPLETE.** Final test count: 137 (up from 80). 0 failures.

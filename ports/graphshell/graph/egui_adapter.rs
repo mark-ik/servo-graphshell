@@ -58,15 +58,15 @@ impl EguiGraphState {
                 } else {
                     match lifecycle {
                         NodeLifecycle::Active => Color32::from_rgb(100, 200, 255),
-                        NodeLifecycle::Cold => Color32::from_rgb(100, 100, 120),
+                        NodeLifecycle::Cold => Color32::from_rgb(140, 140, 165),
                     }
                 };
                 node.set_color(color);
 
                 // Set radius based on lifecycle
                 let radius = match lifecycle {
-                    NodeLifecycle::Active => 15.0,
-                    NodeLifecycle::Cold => 10.0,
+                    NodeLifecycle::Active => 18.0,
+                    NodeLifecycle::Cold => 15.0,
                 };
                 node.display_mut().radius = radius;
 
@@ -175,7 +175,7 @@ mod tests {
         let cold_node = state.graph.node(idx_cold).unwrap();
 
         assert_eq!(active_node.color(), Some(Color32::from_rgb(100, 200, 255)));
-        assert_eq!(cold_node.color(), Some(Color32::from_rgb(100, 100, 120)));
+        assert_eq!(cold_node.color(), Some(Color32::from_rgb(140, 140, 165)));
     }
 
     #[test]

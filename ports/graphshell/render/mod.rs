@@ -9,6 +9,7 @@
 
 use crate::app::{GraphBrowserApp, View};
 use crate::graph::egui_adapter::EguiGraphState;
+use crate::graph::NodeKey;
 use crate::physics::PhysicsConfig;
 use egui::{CentralPanel, Color32, Vec2, Window};
 use egui_graphs::events::Event;
@@ -20,6 +21,20 @@ use euclid::default::Point2D;
 use petgraph::stable_graph::NodeIndex;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+/// Graph interaction action (resolved from egui_graphs events).
+///
+/// Decouples event conversion (needs `egui_state` for NodeIndex→NodeKey
+/// lookups) from action application (pure state mutation), making
+/// graph interactions testable without an egui rendering context.
+pub enum GraphAction {
+    FocusNode(NodeKey),
+    DragStart,
+    DragEnd(NodeKey, Point2D<f32>),
+    MoveNode(NodeKey, Point2D<f32>),
+    SelectNode(NodeKey),
+    Zoom(f32),
+}
 
 /// Render the graph view using egui_graphs
 pub fn render_graph(ctx: &egui::Context, app: &mut GraphBrowserApp) {
@@ -111,100 +126,97 @@ fn clamp_zoom(ctx: &egui::Context, app: &mut GraphBrowserApp) {
     });
 }
 
-/// Process egui_graphs events and sync state back to our graph
+/// Convert egui_graphs events to resolved GraphActions and apply them.
 fn process_events(
     app: &mut GraphBrowserApp,
     events: &Rc<RefCell<Vec<Event>>>,
 ) {
-    // Process events that only need to lookup keys first (collect keys)
-    let mut keys_to_focus = Vec::new();
-    let mut drag_end_idx = None;
-    let mut move_updates = Vec::new();
-    let mut keys_to_select = Vec::new();
-    
+    let mut actions = Vec::new();
+
     for event in events.borrow_mut().drain(..) {
         match event {
             Event::NodeDoubleClick(p) => {
-                // Lookup key from state (immutable borrow)
                 if let Some(state) = app.egui_state.as_ref() {
                     let idx = NodeIndex::new(p.id);
                     if let Some(key) = state.get_key(idx) {
-                        keys_to_focus.push(key);
+                        actions.push(GraphAction::FocusNode(key));
                     }
                 }
             },
             Event::NodeDragStart(_) => {
-                app.set_interacting(true);
+                actions.push(GraphAction::DragStart);
             },
             Event::NodeDragEnd(p) => {
-                app.set_interacting(false);
-                drag_end_idx = Some(NodeIndex::new(p.id));
+                // Resolve final position from egui_state
+                let idx = NodeIndex::new(p.id);
+                if let Some(state) = app.egui_state.as_ref() {
+                    if let Some(key) = state.get_key(idx) {
+                        let pos = state.graph.node(idx)
+                            .map(|n| Point2D::new(n.location().x, n.location().y))
+                            .unwrap_or_default();
+                        actions.push(GraphAction::DragEnd(key, pos));
+                    }
+                }
             },
             Event::NodeMove(p) => {
                 let idx = NodeIndex::new(p.id);
-                // Lookup key first
                 if let Some(state) = app.egui_state.as_ref() {
                     if let Some(key) = state.get_key(idx) {
-                        move_updates.push((key, Point2D::new(p.new_pos[0], p.new_pos[1])));
+                        actions.push(GraphAction::MoveNode(
+                            key,
+                            Point2D::new(p.new_pos[0], p.new_pos[1]),
+                        ));
                     }
                 }
             },
             Event::NodeSelect(p) => {
-                // Lookup key from state (immutable borrow)
                 if let Some(state) = app.egui_state.as_ref() {
                     let idx = NodeIndex::new(p.id);
                     if let Some(key) = state.get_key(idx) {
-                        keys_to_select.push(key);
+                        actions.push(GraphAction::SelectNode(key));
                     }
                 }
             },
-            Event::NodeDeselect(_p) => {
-                // Clear selection state (handled by next select event)
+            Event::NodeDeselect(_) => {
+                // Selection clearing handled by the next SelectNode action
             },
             Event::Zoom(p) => {
-                app.camera.current_zoom = app.camera.clamp(p.new_zoom);
+                actions.push(GraphAction::Zoom(p.new_zoom));
             },
             _ => {}
         }
     }
-    
-    // Now apply all the mutations (no more borrows of egui_state)
-    for key in keys_to_focus {
-        app.focus_node(key);
-    }
-    
-    if let Some(idx) = drag_end_idx {
-        sync_node_position(app, idx);
-    }
-    
-    for (key, position) in move_updates {
-        if let Some(node) = app.graph.get_node_mut(key) {
-            node.position = position;
-        }
-    }
-    
-    for key in keys_to_select {
-        app.select_node(key, false);
-    }
+
+    apply_graph_actions(app, actions);
 }
 
-/// Sync a node's position from egui_graphs back to our graph
-fn sync_node_position(app: &mut GraphBrowserApp, idx: NodeIndex) {
-    // First, read the position from egui_state
-    let position_opt = if let Some(state) = app.egui_state.as_ref() {
-        if let Some(key) = state.get_key(idx) {
-            state.graph.node(idx).map(|egui_node| (key, egui_node.location()))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    
-    // Then update the graph
-    if let Some((key, pos)) = position_opt {
-        if let Some(node) = app.graph.get_node_mut(key) {
-            node.position = Point2D::new(pos.x, pos.y);
+/// Apply resolved graph actions to app state (testable without egui rendering).
+pub fn apply_graph_actions(app: &mut GraphBrowserApp, actions: Vec<GraphAction>) {
+    for action in actions {
+        match action {
+            GraphAction::FocusNode(key) => {
+                app.focus_node(key);
+            },
+            GraphAction::DragStart => {
+                app.set_interacting(true);
+            },
+            GraphAction::DragEnd(key, pos) => {
+                app.set_interacting(false);
+                if let Some(node) = app.graph.get_node_mut(key) {
+                    node.position = pos;
+                }
+            },
+            GraphAction::MoveNode(key, pos) => {
+                if let Some(node) = app.graph.get_node_mut(key) {
+                    node.position = pos;
+                }
+            },
+            GraphAction::SelectNode(key) => {
+                app.select_node(key, false);
+            },
+            GraphAction::Zoom(new_zoom) => {
+                app.camera.current_zoom = app.camera.clamp(new_zoom);
+            },
         }
     }
 }
@@ -237,7 +249,7 @@ fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
 
     // Draw controls hint
     let controls_text =
-        "Double-click: Focus | N: New Node | Del: Remove | Ctrl+Shift+Del: Clear | T: Physics | P: Settings | C: Fit | Home/Esc: Toggle View";
+        "Double-click: Focus | N: New Node | Del: Remove | T: Physics | C: Fit | Home/Esc: Toggle View | F1/?: Help";
     ui.painter().text(
         ui.available_rect_before_wrap().left_bottom() + Vec2::new(10.0, -10.0),
         egui::Align2::LEFT_BOTTOM,
@@ -378,4 +390,152 @@ pub fn render_physics_panel(ctx: &egui::Context, app: &mut GraphBrowserApp) {
                 app.update_physics_config(config);
             }
         });
+}
+
+/// Render keyboard shortcut help panel
+pub fn render_help_panel(ctx: &egui::Context, app: &mut GraphBrowserApp) {
+    if !app.show_help_panel {
+        return;
+    }
+
+    let mut open = app.show_help_panel;
+    Window::new("Keyboard Shortcuts")
+        .open(&mut open)
+        .default_width(350.0)
+        .resizable(false)
+        .show(ctx, |ui| {
+            egui::Grid::new("shortcut_grid")
+                .num_columns(2)
+                .spacing([20.0, 6.0])
+                .show(ui, |ui| {
+                    let shortcuts = [
+                        ("Home / Esc", "Toggle Graph / Detail view"),
+                        ("N", "Create new node"),
+                        ("Delete", "Remove selected nodes"),
+                        ("Ctrl+Shift+Delete", "Clear entire graph"),
+                        ("T", "Toggle physics simulation"),
+                        ("C", "Fit graph to screen"),
+                        ("P", "Physics settings panel"),
+                        ("F1 / ?", "This help panel"),
+                        ("Ctrl+L / Alt+D", "Focus address bar"),
+                        ("Double-click node", "Open node in detail view"),
+                        ("Click + drag", "Move a node"),
+                        ("Scroll wheel", "Zoom in / out"),
+                    ];
+
+                    for (key, desc) in shortcuts {
+                        ui.strong(key);
+                        ui.label(desc);
+                        ui.end_row();
+                    }
+                });
+        });
+    app.show_help_panel = open;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> GraphBrowserApp {
+        GraphBrowserApp::new_for_testing()
+    }
+
+    #[test]
+    fn test_focus_node_action() {
+        let mut app = test_app();
+        let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
+        assert!(matches!(app.view, View::Graph));
+
+        apply_graph_actions(&mut app, vec![GraphAction::FocusNode(key)]);
+
+        assert!(matches!(app.view, View::Detail(k) if k == key));
+    }
+
+    #[test]
+    fn test_drag_start_sets_interacting() {
+        let mut app = test_app();
+        assert!(!app.is_interacting);
+
+        apply_graph_actions(&mut app, vec![GraphAction::DragStart]);
+
+        assert!(app.is_interacting);
+    }
+
+    #[test]
+    fn test_drag_end_clears_interacting_and_updates_position() {
+        let mut app = test_app();
+        let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
+        app.set_interacting(true);
+
+        apply_graph_actions(&mut app, vec![
+            GraphAction::DragEnd(key, Point2D::new(150.0, 250.0)),
+        ]);
+
+        assert!(!app.is_interacting);
+        let node = app.graph.get_node(key).unwrap();
+        assert_eq!(node.position, Point2D::new(150.0, 250.0));
+    }
+
+    #[test]
+    fn test_move_node_updates_position() {
+        let mut app = test_app();
+        let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
+
+        apply_graph_actions(&mut app, vec![
+            GraphAction::MoveNode(key, Point2D::new(42.0, 84.0)),
+        ]);
+
+        let node = app.graph.get_node(key).unwrap();
+        assert_eq!(node.position, Point2D::new(42.0, 84.0));
+    }
+
+    #[test]
+    fn test_select_node_action() {
+        let mut app = test_app();
+        let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
+
+        apply_graph_actions(&mut app, vec![GraphAction::SelectNode(key)]);
+
+        let node = app.graph.get_node(key).unwrap();
+        assert!(node.is_selected);
+    }
+
+    #[test]
+    fn test_zoom_action_clamps() {
+        let mut app = test_app();
+
+        apply_graph_actions(&mut app, vec![GraphAction::Zoom(0.01)]);
+
+        // Should be clamped to min zoom
+        assert!(app.camera.current_zoom >= app.camera.zoom_min);
+    }
+
+    #[test]
+    fn test_multiple_actions_sequence() {
+        let mut app = test_app();
+        let k1 = app.add_node_and_sync("a".into(), Point2D::new(0.0, 0.0));
+        let k2 = app.add_node_and_sync("b".into(), Point2D::new(100.0, 100.0));
+
+        apply_graph_actions(&mut app, vec![
+            GraphAction::SelectNode(k1),
+            GraphAction::MoveNode(k2, Point2D::new(200.0, 300.0)),
+            GraphAction::Zoom(1.5),
+        ]);
+
+        assert!(app.graph.get_node(k1).unwrap().is_selected);
+        assert_eq!(app.graph.get_node(k2).unwrap().position, Point2D::new(200.0, 300.0));
+        assert!((app.camera.current_zoom - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_empty_actions_is_noop() {
+        let mut app = test_app();
+        let key = app.add_node_and_sync("a".into(), Point2D::new(50.0, 60.0));
+        let pos_before = app.graph.get_node(key).unwrap().position;
+
+        apply_graph_actions(&mut app, vec![]);
+
+        assert_eq!(app.graph.get_node(key).unwrap().position, pos_before);
+    }
 }

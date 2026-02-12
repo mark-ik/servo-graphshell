@@ -1,7 +1,7 @@
 # Graphshell Design Documentation Index
 
 **Last Updated**: February 11, 2026
-**Status**: Core browsing graph functional (~4,500 LOC) — Servo, persistence, zoom/camera, physics all working
+**Status**: Core browsing graph functional (~7,000 LOC) — Phase 1 refinement complete
 
 ---
 
@@ -14,13 +14,24 @@
    - Quick start: build & run commands
    - Implementation status summary (what works, what's next)
 
-2. **[ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md)** — Required (20 min)
-   - Foundation code breakdown (~4,500 LOC)
+2. **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** (15 min) **← Start here for development**
+   - Quick orientation for new contributors and AI assistants
+   - Essential commands, common patterns, debugging
+   - Current work status and troubleshooting
+
+3. **[ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md)** — Required (20 min)
+   - Foundation code breakdown (~7,000 LOC)
    - Architecture decisions with rationale (petgraph StableGraph, egui_graphs, kiddo KD-tree, fjall+redb+rkyv persistence)
    - Webview lifecycle management and frame execution order
    - Key crates and their roles
 
-3. **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** (30 min)
+4. **[CODEBASE_MAP.md](CODEBASE_MAP.md)** — Reference (30 min)
+   - Detailed module breakdown with line counts
+   - Test distribution across modules
+   - Data flow diagrams and hot paths
+   - File size reference for context window planning
+
+5. **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** (30 min)
    - Feature-driven plan (11 feature targets)
    - 4 of 5 Phase 1 targets complete (Servo, persistence, zoom, camera)
    - Remaining: thumbnails & favicons
@@ -49,6 +60,8 @@
 
 | Document | Purpose | Read When |
 | -------- | ------- | --------- |
+| **[DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md)** | Quick orientation, commands, patterns, debugging | First (for contributors/AI) |
+| **[CODEBASE_MAP.md](CODEBASE_MAP.md)** | Detailed module map, test distribution, data flow | Reference during development |
 | **[ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md)** | Foundation code, architecture decisions | Second (Required) |
 | **[technical_architecture/SERVO_INTEGRATION_BRIEF.md](technical_architecture/SERVO_INTEGRATION_BRIEF.md)** | Servo webview integration architecture | Reference for webview work |
 | **[BUILD.md](BUILD.md)** | Platform build instructions | Before first build |
@@ -73,6 +86,8 @@
 | Document | Purpose | Read When |
 | -------- | ------- | --------- |
 | **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** | Feature targets, validation criteria, tech stack | Before implementing features |
+| **[implementation_strategy/2026-02-11_phase1_refinement_plan.md](implementation_strategy/2026-02-11_phase1_refinement_plan.md)** | **Active:** Phase 1 refinement (11 steps) | Current work reference |
+| **[implementation_strategy/2026-02-12_persistence_ux_plan.md](implementation_strategy/2026-02-12_persistence_ux_plan.md)** | Persistence reset UX plan | Reference (completed) |
 
 **Feature Plans (by target)**
 
@@ -103,8 +118,10 @@
 
 ## Status Snapshot
 
-- **Core browsing graph functional** (~4,500 LOC). Details in [ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md).
-- **Phase 1 progress**: 4/5 feature targets complete (Servo integration, persistence, zoom, camera). Thumbnails remaining.
+- **Core browsing graph functional** (~7,000 LOC total, ~1,300 core graph+physics). Details in [ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md).
+- **Phase 1 progress**: 4/5 feature targets complete (thumbnails & favicons pending). Refinement complete.
+- **Refinement**: 11/11 steps complete. See [phase1_refinement_plan.md](implementation_strategy/2026-02-11_phase1_refinement_plan.md).
+- **Tests**: 137 passing
 - **Tech stack**: petgraph + egui_graphs + kiddo + fjall + redb + rkyv. Details in [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md).
 
 ---
