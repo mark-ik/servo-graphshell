@@ -48,6 +48,7 @@ use net_traits::request::{
     CredentialsMode, Destination, ParserMetadata, Referrer, RequestBuilder, RequestId, RequestMode,
 };
 use net_traits::{FetchMetadata, Metadata, NetworkError, ReferrerPolicy, ResourceFetchTiming};
+use script_bindings::cformat;
 use script_bindings::domstring::BytesView;
 use script_bindings::error::Fallible;
 use script_bindings::trace::CustomTraceable;
@@ -312,8 +313,9 @@ impl ModuleTree {
             loaded_modules: DomRefCell::new(IndexMap::new()),
         };
 
+        let c_url = cformat!("{url}");
         let mut compile_options =
-            unsafe { CompileOptionsWrapper::new_raw(*cx, url.as_str(), line_number) };
+            unsafe { CompileOptionsWrapper::new_raw(*cx, c_url, line_number) };
         if let Some(introduction_type) = introduction_type {
             compile_options.set_introduction_type(introduction_type);
         }
@@ -393,7 +395,8 @@ impl ModuleTree {
         // Step 3. Set script's base URL and fetch options to null.
         // Note: We don't need to call `SetModulePrivate` for json scripts
 
-        let mut compile_options = unsafe { CompileOptionsWrapper::new_raw(*cx, url.as_str(), 1) };
+        let c_url = cformat!("{url}");
+        let mut compile_options = unsafe { CompileOptionsWrapper::new_raw(*cx, c_url, 1) };
         if let Some(introduction_type) = introduction_type {
             compile_options.set_introduction_type(introduction_type);
         }
@@ -589,7 +592,7 @@ impl ModuleTree {
             // Step 14. Throw a TypeError indicating that specifier was a bare specifier,
             // but was not remapped to anything by importMap.
             None => Err(Error::Type(
-                "Specifier was a bare specifier, but was not remapped to anything by importMap."
+                c"Specifier was a bare specifier, but was not remapped to anything by importMap."
                     .to_owned(),
             )),
         }
@@ -1683,12 +1686,12 @@ pub(crate) fn parse_an_import_map_string(
 ) -> Fallible<ImportMap> {
     // Step 1. Let parsed be the result of parsing a JSON string to an Infra value given input.
     let parsed: JsonValue = serde_json::from_str(&input.str())
-        .map_err(|_| Error::Type("The value needs to be a JSON object.".to_owned()))?;
+        .map_err(|_| Error::Type(c"The value needs to be a JSON object.".to_owned()))?;
     // Step 2. If parsed is not an ordered map, then throw a TypeError indicating that the
     // top-level value needs to be a JSON object.
     let JsonValue::Object(mut parsed) = parsed else {
         return Err(Error::Type(
-            "The top-level value needs to be a JSON object.".to_owned(),
+            c"The top-level value needs to be a JSON object.".to_owned(),
         ));
     };
 
@@ -1700,7 +1703,7 @@ pub(crate) fn parse_an_import_map_string(
         // indicating that the value for the "imports" top-level key needs to be a JSON object.
         let JsonValue::Object(imports) = imports else {
             return Err(Error::Type(
-                "The \"imports\" top-level value needs to be a JSON object.".to_owned(),
+                c"The \"imports\" top-level value needs to be a JSON object.".to_owned(),
             ));
         };
         // Step 4.2 Set sortedAndNormalizedImports to the result of sorting and
@@ -1721,7 +1724,7 @@ pub(crate) fn parse_an_import_map_string(
         // indicating that the value for the "scopes" top-level key needs to be a JSON object.
         let JsonValue::Object(scopes) = scopes else {
             return Err(Error::Type(
-                "The \"scopes\" top-level value needs to be a JSON object.".to_owned(),
+                c"The \"scopes\" top-level value needs to be a JSON object.".to_owned(),
             ));
         };
         // Step 6.2 Set sortedAndNormalizedScopes to the result of sorting and
@@ -1738,7 +1741,7 @@ pub(crate) fn parse_an_import_map_string(
         // indicating that the value for the "integrity" top-level key needs to be a JSON object.
         let JsonValue::Object(integrity) = integrity else {
             return Err(Error::Type(
-                "The \"integrity\" top-level value needs to be a JSON object.".to_owned(),
+                c"The \"integrity\" top-level value needs to be a JSON object.".to_owned(),
             ));
         };
         // Step 8.2 Set normalizedIntegrity to the result of normalizing
@@ -1868,7 +1871,7 @@ fn sort_and_normalize_scopes(
         // that the value of the scope with prefix scopePrefix needs to be a JSON object.
         let JsonValue::Object(potential_specifier_map) = potential_specifier_map else {
             return Err(Error::Type(
-                "The value of the scope with prefix scopePrefix needs to be a JSON object."
+                c"The value of the scope with prefix scopePrefix needs to be a JSON object."
                     .to_owned(),
             ));
         };
@@ -2009,7 +2012,7 @@ pub(crate) fn resolve_imports_match(
             } else {
                 // Step 1.1.1 If resolutionResult is null, then throw a TypeError.
                 return Err(Error::Type(
-                    "Resolution of specifierKey was blocked by a null entry.".to_owned(),
+                    c"Resolution of specifierKey was blocked by a null entry.".to_owned(),
                 ));
             }
         }
@@ -2026,7 +2029,7 @@ pub(crate) fn resolve_imports_match(
             // Step 1.2.2 Assert: resolutionResult is a URL.
             let Some(resolution_result) = resolution_result else {
                 return Err(Error::Type(
-                    "Resolution of specifierKey was blocked by a null entry.".to_owned(),
+                    c"Resolution of specifierKey was blocked by a null entry.".to_owned(),
                 ));
             };
 
@@ -2045,7 +2048,7 @@ pub(crate) fn resolve_imports_match(
             // Step 1.2.7 Assert: url is a URL.
             let Ok(url) = url else {
                 return Err(Error::Type(
-                    "Resolution of normalizedSpecifier was blocked since
+                    c"Resolution of normalizedSpecifier was blocked since
                     the afterPrefix portion could not be URL-parsed relative to
                     the resolutionResult mapped to by the specifierKey prefix."
                         .to_owned(),
@@ -2056,7 +2059,7 @@ pub(crate) fn resolve_imports_match(
             // a code unit prefix of the serialization of url, then throw a TypeError
             if !url.as_str().starts_with(resolution_result.as_str()) {
                 return Err(Error::Type(
-                    "Resolution of normalizedSpecifier was blocked due to
+                    c"Resolution of normalizedSpecifier was blocked due to
                     it backtracking above its prefix specifierKey."
                         .to_owned(),
                 ));
