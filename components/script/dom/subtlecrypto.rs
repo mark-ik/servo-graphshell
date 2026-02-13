@@ -1162,7 +1162,7 @@ impl SubtleCryptoMethods<crate::DomTypeHolder> for SubtleCrypto {
                         // Step 2.1. If the keyData parameter passed to the importKey() method is
                         // not a JsonWebKey dictionary, throw a TypeError.
                         promise.reject_error(
-                            Error::Type("The keyData type does not match the format".to_string()),
+                            Error::Type(c"The keyData type does not match the format".to_owned()),
                             can_gc,
                         );
                         return promise;
@@ -1192,7 +1192,7 @@ impl SubtleCryptoMethods<crate::DomTypeHolder> for SubtleCrypto {
                     // JsonWebKey dictionary, throw a TypeError.
                     ArrayBufferViewOrArrayBufferOrJsonWebKey::JsonWebKey(_) => {
                         promise.reject_error(
-                            Error::Type("The keyData type does not match the format".to_string()),
+                            Error::Type(c"The keyData type does not match the format".to_owned()),
                             can_gc,
                         );
                         return promise;
@@ -3004,7 +3004,7 @@ where
     let conversion = T::safe_from_jsval(cx, value, (), can_gc).map_err(|_| Error::JSFailed)?;
     match conversion {
         ConversionResult::Success(dictionary) => Ok(dictionary),
-        ConversionResult::Failure(error) => Err(Error::Type(error.into())),
+        ConversionResult::Failure(error) => Err(Error::Type(error.into_owned())),
     }
 }
 
@@ -3147,7 +3147,7 @@ impl JsonWebKeyExt for JsonWebKey {
         let key = match JsonWebKey::new(cx, result.handle(), CanGc::note()) {
             Ok(ConversionResult::Success(key)) => key,
             Ok(ConversionResult::Failure(error)) => {
-                return Err(Error::Type(error.to_string()));
+                return Err(Error::Type(error.into_owned()));
             },
             Err(()) => {
                 return Err(Error::JSFailed);

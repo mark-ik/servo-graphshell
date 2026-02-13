@@ -4369,7 +4369,7 @@ impl Document {
         // > If pendingDoc is not fully active, then reject promise with a TypeError exception and return promise.
         if !self.is_fully_active() {
             promise.reject_error(
-                Error::Type("Document is not fully active".to_owned()),
+                Error::Type(c"Document is not fully active".to_owned()),
                 can_gc,
             );
             return promise;
@@ -4485,7 +4485,7 @@ impl Document {
         if !self.is_fully_active() || self.fullscreen_element.get().is_none() {
             promise.reject_error(
                 Error::Type(
-                    "No fullscreen element to exit or document is not fully active".to_owned(),
+                    c"No fullscreen element to exit or document is not fully active".to_owned(),
                 ),
                 can_gc,
             );
@@ -5013,6 +5013,10 @@ impl Document {
     pub(crate) fn set_favicon(&self, favicon: Image) {
         *self.favicon.borrow_mut() = Some(favicon);
         self.notify_embedder_favicon();
+    }
+
+    pub(crate) fn fullscreen_element(&self) -> Option<DomRoot<Element>> {
+        self.fullscreen_element.get()
     }
 }
 
@@ -6462,8 +6466,7 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement>
     fn GetFullscreenElement(&self) -> Option<DomRoot<Element>> {
-        // TODO ShadowRoot
-        self.fullscreen_element.get()
+        DocumentOrShadowRoot::get_fullscreen_element(&self.node, self.fullscreen_element.get())
     }
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-exitfullscreen>

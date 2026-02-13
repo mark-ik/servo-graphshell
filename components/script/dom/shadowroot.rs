@@ -578,6 +578,14 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
 
         result
     }
+
+    /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement>
+    fn GetFullscreenElement(&self) -> Option<DomRoot<Element>> {
+        DocumentOrShadowRoot::get_fullscreen_element(
+            self.upcast::<Node>(),
+            self.document.fullscreen_element(),
+        )
+    }
 }
 
 impl VirtualMethods for ShadowRoot {
