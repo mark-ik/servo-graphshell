@@ -7,7 +7,7 @@
 //! Keyboard shortcuts are handled here. Mouse interaction (drag, pan, zoom,
 //! selection) is handled by egui_graphs via the GraphView widget.
 
-use crate::app::GraphBrowserApp;
+use crate::app::{GraphBrowserApp, GraphIntent};
 use egui::Key;
 
 /// Keyboard actions collected from egui input events.
@@ -93,28 +93,30 @@ pub(crate) fn collect_actions(ctx: &egui::Context) -> KeyboardActions {
 
 /// Apply keyboard actions to the app state (testable without egui::Context).
 pub fn apply_actions(app: &mut GraphBrowserApp, actions: &KeyboardActions) {
+    let mut intents = Vec::new();
     if actions.toggle_physics {
-        app.toggle_physics();
+        intents.push(GraphIntent::TogglePhysics);
     }
-    // View toggling is handled by GUI tile logic (egui_tiles migration path).
+    // View toggling is owned by GUI tile logic.
     if actions.fit_to_screen {
-        app.request_fit_to_screen();
+        intents.push(GraphIntent::RequestFitToScreen);
     }
     if actions.toggle_physics_panel {
-        app.toggle_physics_panel();
+        intents.push(GraphIntent::TogglePhysicsPanel);
     }
     if actions.toggle_help_panel {
-        app.toggle_help_panel();
+        intents.push(GraphIntent::ToggleHelpPanel);
     }
     if actions.create_node {
-        app.create_new_node_near_center();
+        intents.push(GraphIntent::CreateNodeNearCenter);
     }
     if actions.delete_selected {
-        app.remove_selected_nodes();
+        intents.push(GraphIntent::RemoveSelectedNodes);
     }
     if actions.clear_graph {
-        app.clear_graph();
+        intents.push(GraphIntent::ClearGraph);
     }
+    app.apply_intents(intents);
 }
 
 #[cfg(test)]
@@ -133,10 +135,13 @@ mod tests {
         let selected_before = app.selected_nodes.clone();
         let count_before = app.graph.node_count();
 
-        apply_actions(&mut app, &KeyboardActions {
-            toggle_view: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                toggle_view: true,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(app.selected_nodes, selected_before);
         assert_eq!(app.graph.node_count(), count_before);
@@ -147,10 +152,13 @@ mod tests {
         let mut app = test_app();
         let was_running = app.physics.is_running;
 
-        apply_actions(&mut app, &KeyboardActions {
-            toggle_physics: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                toggle_physics: true,
+                ..Default::default()
+            },
+        );
 
         assert_ne!(app.physics.is_running, was_running);
     }
@@ -160,10 +168,13 @@ mod tests {
         let mut app = test_app();
         assert!(!app.fit_to_screen_requested);
 
-        apply_actions(&mut app, &KeyboardActions {
-            fit_to_screen: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                fit_to_screen: true,
+                ..Default::default()
+            },
+        );
 
         assert!(app.fit_to_screen_requested);
     }
@@ -173,10 +184,13 @@ mod tests {
         let mut app = test_app();
         let was_shown = app.show_physics_panel;
 
-        apply_actions(&mut app, &KeyboardActions {
-            toggle_physics_panel: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                toggle_physics_panel: true,
+                ..Default::default()
+            },
+        );
 
         assert_ne!(app.show_physics_panel, was_shown);
     }
@@ -186,17 +200,23 @@ mod tests {
         let mut app = test_app();
         assert!(!app.show_help_panel);
 
-        apply_actions(&mut app, &KeyboardActions {
-            toggle_help_panel: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                toggle_help_panel: true,
+                ..Default::default()
+            },
+        );
 
         assert!(app.show_help_panel);
 
-        apply_actions(&mut app, &KeyboardActions {
-            toggle_help_panel: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                toggle_help_panel: true,
+                ..Default::default()
+            },
+        );
 
         assert!(!app.show_help_panel);
     }
@@ -206,10 +226,13 @@ mod tests {
         let mut app = test_app();
         assert_eq!(app.graph.node_count(), 0);
 
-        apply_actions(&mut app, &KeyboardActions {
-            create_node: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                create_node: true,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(app.graph.node_count(), 1);
     }
@@ -222,10 +245,13 @@ mod tests {
         app.select_node(key, false);
         assert_eq!(app.graph.node_count(), 1);
 
-        apply_actions(&mut app, &KeyboardActions {
-            delete_selected: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                delete_selected: true,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(app.graph.node_count(), 0);
     }
@@ -238,10 +264,13 @@ mod tests {
         app.add_node_and_sync("b".into(), Point2D::new(100.0, 0.0));
         assert_eq!(app.graph.node_count(), 2);
 
-        apply_actions(&mut app, &KeyboardActions {
-            clear_graph: true,
-            ..Default::default()
-        });
+        apply_actions(
+            &mut app,
+            &KeyboardActions {
+                clear_graph: true,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(app.graph.node_count(), 0);
     }

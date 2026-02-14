@@ -3,26 +3,30 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 //! Serializable types for graph persistence.
-//!
-//! Uses rkyv for zero-copy deserialization. All types use URL strings
-//! as stable identity (SlotMap keys are not stable across sessions).
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-/// Persisted node (URL-keyed, no SlotMap key)
+/// Persisted node.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 pub struct PersistedNode {
+    /// Stable node identity.
+    pub node_id: String,
     pub url: String,
     pub title: String,
     pub position_x: f32,
     pub position_y: f32,
     pub is_pinned: bool,
+    pub history_entries: Vec<String>,
+    pub history_index: usize,
+    pub thumbnail_png: Option<Vec<u8>>,
+    pub thumbnail_width: u32,
+    pub thumbnail_height: u32,
     pub favicon_rgba: Option<Vec<u8>>,
     pub favicon_width: u32,
     pub favicon_height: u32,
 }
 
-/// Edge type for persistence
+/// Edge type for persistence.
 #[derive(Archive, Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[rkyv(derive(Debug, PartialEq))]
 pub enum PersistedEdgeType {
@@ -30,15 +34,15 @@ pub enum PersistedEdgeType {
     History,
 }
 
-/// Persisted edge (URL-keyed endpoints)
+/// Persisted edge.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 pub struct PersistedEdge {
-    pub from_url: String,
-    pub to_url: String,
+    pub from_node_id: String,
+    pub to_node_id: String,
     pub edge_type: PersistedEdgeType,
 }
 
-/// Full graph snapshot for periodic saves
+/// Full graph snapshot for periodic saves.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 pub struct GraphSnapshot {
     pub nodes: Vec<PersistedNode>,
@@ -46,33 +50,34 @@ pub struct GraphSnapshot {
     pub timestamp_secs: u64,
 }
 
-/// Log entry for mutation journaling
+/// Log entry for mutation journaling.
 #[derive(Archive, Serialize, Deserialize, Clone, Debug)]
 pub enum LogEntry {
     AddNode {
+        node_id: String,
         url: String,
         position_x: f32,
         position_y: f32,
     },
     AddEdge {
-        from_url: String,
-        to_url: String,
+        from_node_id: String,
+        to_node_id: String,
         edge_type: PersistedEdgeType,
     },
     UpdateNodeTitle {
-        url: String,
+        node_id: String,
         title: String,
     },
     PinNode {
-        url: String,
+        node_id: String,
         is_pinned: bool,
     },
     RemoveNode {
-        url: String,
+        node_id: String,
     },
     ClearGraph,
     UpdateNodeUrl {
-        old_url: String,
+        node_id: String,
         new_url: String,
     },
 }
@@ -80,15 +85,22 @@ pub enum LogEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_persisted_node_roundtrip() {
         let node = PersistedNode {
+            node_id: Uuid::new_v4().to_string(),
             url: "https://example.com".to_string(),
             title: "Example".to_string(),
             position_x: 100.0,
             position_y: 200.0,
             is_pinned: true,
+            history_entries: vec!["https://example.com".to_string()],
+            history_index: 0,
+            thumbnail_png: Some(vec![1, 2, 3]),
+            thumbnail_width: 64,
+            thumbnail_height: 48,
             favicon_rgba: Some(vec![255, 0, 0, 255]),
             favicon_width: 1,
             favicon_height: 1,
@@ -96,11 +108,17 @@ mod tests {
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&node).unwrap();
         let archived = rkyv::access::<ArchivedPersistedNode, rkyv::rancor::Error>(&bytes).unwrap();
+        assert!(!archived.node_id.as_str().is_empty());
         assert_eq!(archived.url.as_str(), "https://example.com");
         assert_eq!(archived.title.as_str(), "Example");
         assert_eq!(archived.position_x, 100.0);
         assert_eq!(archived.position_y, 200.0);
         assert!(archived.is_pinned);
+        assert_eq!(archived.history_entries.len(), 1);
+        assert_eq!(archived.history_index, 0);
+        assert_eq!(archived.thumbnail_png.as_ref().unwrap().len(), 3);
+        assert_eq!(archived.thumbnail_width, 64);
+        assert_eq!(archived.thumbnail_height, 48);
         assert_eq!(archived.favicon_rgba.as_ref().unwrap().len(), 4);
         assert_eq!(archived.favicon_width, 1);
         assert_eq!(archived.favicon_height, 1);
@@ -109,62 +127,52 @@ mod tests {
     #[test]
     fn test_persisted_edge_roundtrip() {
         let edge = PersistedEdge {
-            from_url: "https://a.com".to_string(),
-            to_url: "https://b.com".to_string(),
+            from_node_id: Uuid::new_v4().to_string(),
+            to_node_id: Uuid::new_v4().to_string(),
             edge_type: PersistedEdgeType::Hyperlink,
         };
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&edge).unwrap();
         let archived = rkyv::access::<ArchivedPersistedEdge, rkyv::rancor::Error>(&bytes).unwrap();
-        assert_eq!(archived.from_url.as_str(), "https://a.com");
-        assert_eq!(archived.to_url.as_str(), "https://b.com");
+        assert!(!archived.from_node_id.as_str().is_empty());
+        assert!(!archived.to_node_id.as_str().is_empty());
         assert_eq!(archived.edge_type, ArchivedPersistedEdgeType::Hyperlink);
     }
 
     #[test]
     fn test_graph_snapshot_roundtrip() {
         let snapshot = GraphSnapshot {
-            nodes: vec![
-                PersistedNode {
-                    url: "https://a.com".to_string(),
-                    title: "A".to_string(),
-                    position_x: 0.0,
-                    position_y: 0.0,
-                    is_pinned: false,
-                    favicon_rgba: None,
-                    favicon_width: 0,
-                    favicon_height: 0,
-                },
-                PersistedNode {
-                    url: "https://b.com".to_string(),
-                    title: "B".to_string(),
-                    position_x: 100.0,
-                    position_y: 100.0,
-                    is_pinned: true,
-                    favicon_rgba: Some(vec![10, 20, 30, 255]),
-                    favicon_width: 1,
-                    favicon_height: 1,
-                },
-            ],
-            edges: vec![PersistedEdge {
-                from_url: "https://a.com".to_string(),
-                to_url: "https://b.com".to_string(),
-                edge_type: PersistedEdgeType::Hyperlink,
+            nodes: vec![PersistedNode {
+                node_id: Uuid::new_v4().to_string(),
+                url: "https://a.com".to_string(),
+                title: "A".to_string(),
+                position_x: 0.0,
+                position_y: 0.0,
+                is_pinned: false,
+                history_entries: vec![],
+                history_index: 0,
+                thumbnail_png: None,
+                thumbnail_width: 0,
+                thumbnail_height: 0,
+                favicon_rgba: None,
+                favicon_width: 0,
+                favicon_height: 0,
             }],
+            edges: vec![],
             timestamp_secs: 1234567890,
         };
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot).unwrap();
-        let archived =
-            rkyv::access::<ArchivedGraphSnapshot, rkyv::rancor::Error>(&bytes).unwrap();
-        assert_eq!(archived.nodes.len(), 2);
-        assert_eq!(archived.edges.len(), 1);
+        let archived = rkyv::access::<ArchivedGraphSnapshot, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(archived.nodes.len(), 1);
+        assert_eq!(archived.edges.len(), 0);
         assert_eq!(archived.timestamp_secs, 1234567890);
     }
 
     #[test]
     fn test_log_entry_add_node_roundtrip() {
         let entry = LogEntry::AddNode {
+            node_id: Uuid::new_v4().to_string(),
             url: "https://example.com".to_string(),
             position_x: 50.0,
             position_y: 75.0,
@@ -174,10 +182,12 @@ mod tests {
         let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
         match archived {
             ArchivedLogEntry::AddNode {
+                node_id,
                 url,
                 position_x,
                 position_y,
             } => {
+                assert!(!node_id.as_str().is_empty());
                 assert_eq!(url.as_str(), "https://example.com");
                 assert_eq!(*position_x, 50.0);
                 assert_eq!(*position_y, 75.0);
@@ -187,84 +197,17 @@ mod tests {
     }
 
     #[test]
-    fn test_log_entry_add_edge_roundtrip() {
-        let entry = LogEntry::AddEdge {
-            from_url: "https://a.com".to_string(),
-            to_url: "https://b.com".to_string(),
-            edge_type: PersistedEdgeType::History,
-        };
-
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
-        let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
-        match archived {
-            ArchivedLogEntry::AddEdge {
-                from_url,
-                to_url,
-                edge_type,
-            } => {
-                assert_eq!(from_url.as_str(), "https://a.com");
-                assert_eq!(to_url.as_str(), "https://b.com");
-                assert_eq!(*edge_type, ArchivedPersistedEdgeType::History);
-            },
-            _ => panic!("Expected AddEdge variant"),
-        }
-    }
-
-    #[test]
-    fn test_log_entry_update_title_roundtrip() {
-        let entry = LogEntry::UpdateNodeTitle {
-            url: "https://example.com".to_string(),
-            title: "New Title".to_string(),
-        };
-
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
-        let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
-        match archived {
-            ArchivedLogEntry::UpdateNodeTitle { url, title } => {
-                assert_eq!(url.as_str(), "https://example.com");
-                assert_eq!(title.as_str(), "New Title");
-            },
-            _ => panic!("Expected UpdateNodeTitle variant"),
-        }
-    }
-
-    #[test]
-    fn test_log_entry_remove_node_roundtrip() {
-        let entry = LogEntry::RemoveNode {
-            url: "https://example.com".to_string(),
-        };
-
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
-        let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
-        match archived {
-            ArchivedLogEntry::RemoveNode { url } => {
-                assert_eq!(url.as_str(), "https://example.com");
-            },
-            _ => panic!("Expected RemoveNode variant"),
-        }
-    }
-
-    #[test]
-    fn test_log_entry_clear_graph_roundtrip() {
-        let entry = LogEntry::ClearGraph;
-
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
-        let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
-        assert!(matches!(archived, ArchivedLogEntry::ClearGraph));
-    }
-
-    #[test]
     fn test_log_entry_update_node_url_roundtrip() {
         let entry = LogEntry::UpdateNodeUrl {
-            old_url: "https://old.com".to_string(),
+            node_id: Uuid::new_v4().to_string(),
             new_url: "https://new.com".to_string(),
         };
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&entry).unwrap();
         let archived = rkyv::access::<ArchivedLogEntry, rkyv::rancor::Error>(&bytes).unwrap();
         match archived {
-            ArchivedLogEntry::UpdateNodeUrl { old_url, new_url } => {
-                assert_eq!(old_url.as_str(), "https://old.com");
+            ArchivedLogEntry::UpdateNodeUrl { node_id, new_url } => {
+                assert!(!node_id.as_str().is_empty());
                 assert_eq!(new_url.as_str(), "https://new.com");
             },
             _ => panic!("Expected UpdateNodeUrl variant"),

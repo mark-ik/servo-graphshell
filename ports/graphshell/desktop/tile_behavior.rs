@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 use egui::{Id, Response, Sense, Stroke, TextStyle, Ui, Vec2, WidgetText, vec2};
 use egui_tiles::{Behavior, TabState, Tile, TileId, Tiles, UiResponse};
 
-use crate::app::GraphBrowserApp;
+use crate::app::{GraphBrowserApp, GraphIntent};
 use crate::graph::NodeKey;
 use crate::render;
 use crate::render::GraphAction;
@@ -76,7 +76,8 @@ impl<'a> GraphshellTileBehavior<'a> {
         let favicon_hash =
             Self::hash_favicon(favicon_width as u32, favicon_height as u32, &favicon_rgba);
 
-        let handle = if let Some((cached_hash, handle)) = self.tile_favicon_textures.get(&node_key) {
+        let handle = if let Some((cached_hash, handle)) = self.tile_favicon_textures.get(&node_key)
+        {
             if *cached_hash == favicon_hash {
                 handle.clone()
             } else {
@@ -94,8 +95,10 @@ impl<'a> GraphshellTileBehavior<'a> {
                 handle
             }
         } else {
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([favicon_width, favicon_height], &favicon_rgba);
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [favicon_width, favicon_height],
+                &favicon_rgba,
+            );
             let handle = ui.ctx().load_texture(
                 format!("tile-favicon-{node_key:?}-{favicon_hash}"),
                 image,
@@ -111,12 +114,7 @@ impl<'a> GraphshellTileBehavior<'a> {
 }
 
 impl<'a> Behavior<TileKind> for GraphshellTileBehavior<'a> {
-    fn pane_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        _tile_id: TileId,
-        pane: &mut TileKind,
-    ) -> UiResponse {
+    fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut TileKind) -> UiResponse {
         match pane {
             TileKind::Graph => {
                 let actions = render::render_graph_in_ui_collect_actions(ui, self.graph_app);
@@ -125,7 +123,10 @@ impl<'a> Behavior<TileKind> for GraphshellTileBehavior<'a> {
                 for action in actions {
                     match action {
                         GraphAction::FocusNode(key) => {
-                            self.graph_app.select_node(key, false);
+                            self.graph_app.apply_intents([GraphIntent::SelectNode {
+                                key,
+                                multi_select: false,
+                            }]);
                             self.pending_open_nodes.push(key);
                         },
                         other => passthrough_actions.push(other),
@@ -133,6 +134,7 @@ impl<'a> Behavior<TileKind> for GraphshellTileBehavior<'a> {
                 }
 
                 render::apply_graph_actions(self.graph_app, passthrough_actions);
+                render::sync_graph_positions_from_layout(self.graph_app);
                 render::render_graph_info_in_ui(ui, self.graph_app);
             },
             TileKind::WebView(node_key) => {
@@ -186,8 +188,12 @@ impl<'a> Behavior<TileKind> for GraphshellTileBehavior<'a> {
         };
 
         let font_id = TextStyle::Button.resolve(ui.style());
-        let galley = WidgetText::from(title_text)
-            .into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, font_id);
+        let galley = WidgetText::from(title_text).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            font_id,
+        );
 
         let icon_width = if favicon_texture.is_some() {
             icon_size + icon_spacing
@@ -225,10 +231,8 @@ impl<'a> Behavior<TileKind> for GraphshellTileBehavior<'a> {
 
             let mut text_rect = tab_rect.shrink(x_margin);
             if let Some(texture_id) = favicon_texture {
-                let icon_rect = egui::Align2::LEFT_CENTER.align_size_within_rect(
-                    vec2(icon_size, icon_size),
-                    text_rect,
-                );
+                let icon_rect = egui::Align2::LEFT_CENTER
+                    .align_size_within_rect(vec2(icon_size, icon_size), text_rect);
                 ui.painter().image(
                     texture_id,
                     icon_rect,

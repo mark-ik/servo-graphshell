@@ -9,24 +9,22 @@
 
 use super::{EdgeType, Graph, Node, NodeKey, NodeLifecycle};
 use egui::epaint::{CircleShape, TextShape};
-use egui::{Color32, FontFamily, FontId, Pos2, Rect, Shape, Stroke, TextureHandle, TextureId, Vec2};
-use egui_graphs::{DefaultEdgeShape, DisplayNode, to_graph_custom};
-use egui_graphs::NodeProps;
+use egui::{
+    Color32, FontFamily, FontId, Pos2, Rect, Shape, Stroke, TextureHandle, TextureId, Vec2,
+};
 use egui_graphs::DrawContext;
+use egui_graphs::NodeProps;
+use egui_graphs::{DefaultEdgeShape, DisplayNode, to_graph_custom};
+use image::load_from_memory;
+use petgraph::Directed;
 use petgraph::graph::DefaultIx;
 use petgraph::stable_graph::NodeIndex;
-use petgraph::Directed;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 /// Type alias for the egui_graphs graph with our node/edge types
-pub type EguiGraph = egui_graphs::Graph<
-    Node,
-    EdgeType,
-    Directed,
-    DefaultIx,
-    GraphNodeShape,
-    DefaultEdgeShape,
->;
+pub type EguiGraph =
+    egui_graphs::Graph<Node, EdgeType, Directed, DefaultIx, GraphNodeShape, DefaultEdgeShape>;
 
 /// Node shape that renders favicon textures when available.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -38,6 +36,12 @@ pub struct GraphNodeShape {
     color: Option<Color32>,
     label_text: String,
     radius: f32,
+    thumbnail_png: Option<Vec<u8>>,
+    thumbnail_width: u32,
+    thumbnail_height: u32,
+    thumbnail_hash: u64,
+    #[serde(skip, default)]
+    thumbnail_handle: Option<TextureHandle>,
     favicon_rgba: Option<Vec<u8>>,
     favicon_width: u32,
     favicon_height: u32,
@@ -56,12 +60,18 @@ impl From<NodeProps<Node>> for GraphNodeShape {
             color: node_props.color(),
             label_text: node_props.label.to_string(),
             radius: 5.0,
+            thumbnail_png: node_props.payload.thumbnail_png.clone(),
+            thumbnail_width: node_props.payload.thumbnail_width,
+            thumbnail_height: node_props.payload.thumbnail_height,
+            thumbnail_hash: 0,
+            thumbnail_handle: None,
             favicon_rgba: node_props.payload.favicon_rgba.clone(),
             favicon_width: node_props.payload.favicon_width,
             favicon_height: node_props.payload.favicon_height,
             favicon_hash: 0,
             favicon_handle: None,
         };
+        shape.thumbnail_hash = Self::hash_bytes(&shape.thumbnail_png);
         shape.favicon_hash = Self::hash_favicon(&shape.favicon_rgba);
         shape
     }
@@ -93,7 +103,12 @@ impl DisplayNode<Node, EdgeType, Directed, DefaultIx> for GraphNodeShape {
             .into(),
         );
 
-        if let Some(texture_id) = self.ensure_favicon_texture(ctx) {
+        if let Some(texture_id) = self.ensure_thumbnail_texture(ctx) {
+            let size = Vec2::new(circle_radius * 2.4, circle_radius * 1.8);
+            let rect = Rect::from_center_size(circle_center, size);
+            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+            res.push(Shape::image(texture_id, rect, uv, Color32::WHITE));
+        } else if let Some(texture_id) = self.ensure_favicon_texture(ctx) {
             let size = Vec2::splat(circle_radius * 1.5);
             let rect = Rect::from_center_size(circle_center, size);
             let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
@@ -105,7 +120,10 @@ impl DisplayNode<Node, EdgeType, Directed, DefaultIx> for GraphNodeShape {
         }
 
         let galley = self.label_galley(ctx, circle_radius, color);
-        let label_pos = Pos2::new(center_x(galley.size().x, circle_center.x), circle_center.y - circle_radius * 2.0);
+        let label_pos = Pos2::new(
+            center_x(galley.size().x, circle_center.x),
+            circle_center.y - circle_radius * 2.0,
+        );
         res.push(TextShape::new(label_pos, galley, color).into());
         res
     }
@@ -118,11 +136,24 @@ impl DisplayNode<Node, EdgeType, Directed, DefaultIx> for GraphNodeShape {
         self.label_text = state.label.to_string();
         self.color = state.color();
 
+        let new_thumbnail = state.payload.thumbnail_png.clone();
+        let new_thumbnail_hash = Self::hash_bytes(&new_thumbnail);
+        if new_thumbnail_hash != self.thumbnail_hash
+            || self.thumbnail_width != state.payload.thumbnail_width
+            || self.thumbnail_height != state.payload.thumbnail_height
+        {
+            self.thumbnail_png = new_thumbnail;
+            self.thumbnail_width = state.payload.thumbnail_width;
+            self.thumbnail_height = state.payload.thumbnail_height;
+            self.thumbnail_hash = new_thumbnail_hash;
+            self.thumbnail_handle = None;
+        }
+
         let new_rgba = state.payload.favicon_rgba.clone();
         let new_hash = Self::hash_favicon(&new_rgba);
-        if new_hash != self.favicon_hash ||
-            self.favicon_width != state.payload.favicon_width ||
-            self.favicon_height != state.payload.favicon_height
+        if new_hash != self.favicon_hash
+            || self.favicon_width != state.payload.favicon_width
+            || self.favicon_height != state.payload.favicon_height
         {
             self.favicon_rgba = new_rgba;
             self.favicon_width = state.payload.favicon_width;
@@ -134,6 +165,32 @@ impl DisplayNode<Node, EdgeType, Directed, DefaultIx> for GraphNodeShape {
 }
 
 impl GraphNodeShape {
+    fn ensure_thumbnail_texture(&mut self, ctx: &DrawContext) -> Option<TextureId> {
+        if self.thumbnail_handle.is_none() {
+            let thumbnail_png = self.thumbnail_png.as_ref()?;
+            let image = load_from_memory(thumbnail_png).ok()?.to_rgba8();
+            let width = image.width() as usize;
+            let height = image.height() as usize;
+            if width == 0 || height == 0 {
+                return None;
+            }
+            if self.thumbnail_width > 0
+                && self.thumbnail_height > 0
+                && (self.thumbnail_width != width as u32 || self.thumbnail_height != height as u32)
+            {
+                return None;
+            }
+            let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &image);
+            let handle = ctx.ctx.load_texture(
+                format!("graph-node-thumbnail-{}", self.thumbnail_hash),
+                image,
+                Default::default(),
+            );
+            self.thumbnail_handle = Some(handle);
+        }
+        self.thumbnail_handle.as_ref().map(|h| h.id())
+    }
+
     fn effective_color(&self, ctx: &DrawContext) -> Color32 {
         if let Some(c) = self.color {
             return c;
@@ -193,6 +250,10 @@ impl GraphNodeShape {
     }
 
     fn hash_favicon(data: &Option<Vec<u8>>) -> u64 {
+        Self::hash_bytes(data)
+    }
+
+    fn hash_bytes(data: &Option<Vec<u8>>) -> u64 {
         let Some(bytes) = data else {
             return 0;
         };
@@ -217,31 +278,26 @@ impl EguiGraphState {
     ///
     /// Sets node positions, labels, colors, and selection state
     /// based on current graph data.
-    pub fn from_graph(graph: &Graph) -> Self {
-        let egui_graph: EguiGraph = to_graph_custom(
+    pub fn from_graph(graph: &Graph, selected_nodes: &HashSet<NodeKey>) -> Self {
+        let mut egui_graph: EguiGraph = to_graph_custom(
             &graph.inner,
             |node: &mut egui_graphs::Node<Node, EdgeType, Directed, DefaultIx, GraphNodeShape>| {
                 // Extract all data from payload before any mutations
                 let position = node.payload().position;
                 let title = node.payload().title.clone();
-                let is_selected = node.payload().is_selected;
                 let lifecycle = node.payload().lifecycle;
 
-                // Set position from physics engine
+                // Seed position from app graph state
                 node.set_location(Pos2::new(position.x, position.y));
 
                 // Set label (truncated title)
                 let label = crate::util::truncate_with_ellipsis(&title, 20);
                 node.set_label(label);
 
-                // Set color based on lifecycle and selection
-                let color = if is_selected {
-                    Color32::from_rgb(255, 200, 100) // Gold for selected
-                } else {
-                    match lifecycle {
-                        NodeLifecycle::Active => Color32::from_rgb(100, 200, 255),
-                        NodeLifecycle::Cold => Color32::from_rgb(140, 140, 165),
-                    }
+                // Set color based on lifecycle.
+                let color = match lifecycle {
+                    NodeLifecycle::Active => Color32::from_rgb(100, 200, 255),
+                    NodeLifecycle::Cold => Color32::from_rgb(140, 140, 165),
                 };
                 node.set_color(color);
 
@@ -252,17 +308,23 @@ impl EguiGraphState {
                 };
                 node.display_mut().radius = radius;
 
-                // Mark selected nodes
-                node.set_selected(is_selected);
+                // Selection is projected from app state after graph conversion.
+                node.set_selected(false);
             },
             |_edge| {
                 // Edge styling handled by SettingsStyle hooks
             },
         );
 
-        Self {
-            graph: egui_graph,
+        // Project app selection onto egui nodes.
+        for key in selected_nodes {
+            if let Some(node) = egui_graph.node_mut(*key) {
+                node.set_selected(true);
+                node.set_color(Color32::from_rgb(255, 200, 100));
+            }
         }
+
+        Self { graph: egui_graph }
     }
 
     /// Get NodeKey from a petgraph NodeIndex.
@@ -289,7 +351,8 @@ mod tests {
     #[test]
     fn test_egui_adapter_empty_graph() {
         let graph = Graph::new();
-        let state = EguiGraphState::from_graph(&graph);
+        let selected_nodes = HashSet::new();
+        let state = EguiGraphState::from_graph(&graph, &selected_nodes);
 
         assert_eq!(state.graph.node_count(), 0);
         assert_eq!(state.graph.edge_count(), 0);
@@ -298,9 +361,12 @@ mod tests {
     #[test]
     fn test_egui_adapter_nodes_with_positions() {
         let mut graph = Graph::new();
-        let key = graph.add_node("https://example.com".to_string(), Point2D::new(100.0, 200.0));
-
-        let state = EguiGraphState::from_graph(&graph);
+        let key = graph.add_node(
+            "https://example.com".to_string(),
+            Point2D::new(100.0, 200.0),
+        );
+        let selected_nodes = HashSet::new();
+        let state = EguiGraphState::from_graph(&graph, &selected_nodes);
 
         assert_eq!(state.graph.node_count(), 1);
 
@@ -315,8 +381,8 @@ mod tests {
         let key1 = graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
         let key2 = graph.add_node("b".to_string(), Point2D::new(100.0, 100.0));
         graph.add_edge(key1, key2, EdgeType::Hyperlink);
-
-        let state = EguiGraphState::from_graph(&graph);
+        let selected_nodes = HashSet::new();
+        let state = EguiGraphState::from_graph(&graph, &selected_nodes);
 
         let idx1 = state.get_index(key1).unwrap();
         let idx2 = state.get_index(key2).unwrap();
@@ -331,9 +397,10 @@ mod tests {
     fn test_egui_adapter_selection_state() {
         let mut graph = Graph::new();
         let key = graph.add_node("test".to_string(), Point2D::new(0.0, 0.0));
-        graph.get_node_mut(key).unwrap().is_selected = true;
+        let mut selected_nodes = HashSet::new();
+        selected_nodes.insert(key);
 
-        let state = EguiGraphState::from_graph(&graph);
+        let state = EguiGraphState::from_graph(&graph, &selected_nodes);
         let idx = state.get_index(key).unwrap();
         let node = state.graph.node(idx).unwrap();
 
@@ -347,8 +414,8 @@ mod tests {
         let key_cold = graph.add_node("cold".to_string(), Point2D::new(100.0, 0.0));
 
         graph.get_node_mut(key_active).unwrap().lifecycle = NodeLifecycle::Active;
-
-        let state = EguiGraphState::from_graph(&graph);
+        let selected_nodes = HashSet::new();
+        let state = EguiGraphState::from_graph(&graph, &selected_nodes);
 
         let idx_active = state.get_index(key_active).unwrap();
         let idx_cold = state.get_index(key_cold).unwrap();
@@ -364,7 +431,8 @@ mod tests {
     fn test_truncate_label() {
         use crate::util::truncate_with_ellipsis;
         assert_eq!(truncate_with_ellipsis("short", 20), "short");
-        let result = truncate_with_ellipsis("this is a very long title that should be truncated", 20);
+        let result =
+            truncate_with_ellipsis("this is a very long title that should be truncated", 20);
         assert_eq!(result.chars().count(), 20);
         assert!(result.ends_with('\u{2026}'));
     }

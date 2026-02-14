@@ -4,15 +4,16 @@
 
 //! Application state management for the graph browser.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use std::path::PathBuf;
 
-use crate::graph::{Graph, NodeKey};
 use crate::graph::egui_adapter::EguiGraphState;
+use crate::graph::{EdgeType, Graph, NodeKey};
 use crate::persistence::GraphStore;
 use crate::persistence::types::{LogEntry, PersistedEdgeType};
-use crate::physics::{PhysicsConfig, PhysicsEngine};
-use crate::physics::worker::{PhysicsCommand, PhysicsResponse, PhysicsWorker};
+use egui_graphs::FruchtermanReingoldState;
+use euclid::default::Point2D;
 use log::warn;
 use servo::WebViewId;
 
@@ -44,19 +45,146 @@ impl Default for Camera {
     }
 }
 
+/// Canonical node-selection state.
+///
+/// This wraps the selected-node set with explicit metadata so consumers can
+/// reason about selection changes deterministically.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SelectionState {
+    nodes: HashSet<NodeKey>,
+    primary: Option<NodeKey>,
+    revision: u64,
+}
+
+impl SelectionState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Monotonic revision incremented whenever the selection changes.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Primary selected node (most recently selected).
+    pub fn primary(&self) -> Option<NodeKey> {
+        self.primary
+    }
+
+    pub fn select(&mut self, key: NodeKey, multi_select: bool) {
+        if multi_select {
+            if self.nodes.insert(key) {
+                self.primary = Some(key);
+                self.revision = self.revision.saturating_add(1);
+            }
+            return;
+        }
+
+        if self.nodes.len() == 1 && self.nodes.contains(&key) && self.primary == Some(key) {
+            return;
+        }
+
+        self.nodes.clear();
+        self.nodes.insert(key);
+        self.primary = Some(key);
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    pub fn clear(&mut self) {
+        if self.nodes.is_empty() && self.primary.is_none() {
+            return;
+        }
+        self.nodes.clear();
+        self.primary = None;
+        self.revision = self.revision.saturating_add(1);
+    }
+}
+
+impl Deref for SelectionState {
+    type Target = HashSet<NodeKey>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.nodes
+    }
+}
+
+/// Deterministic mutation intent boundary for graph state updates.
+#[derive(Debug, Clone)]
+pub enum GraphIntent {
+    TogglePhysics,
+    RequestFitToScreen,
+    TogglePhysicsPanel,
+    ToggleHelpPanel,
+    CreateNodeNearCenter,
+    CreateNodeAtUrl {
+        url: String,
+        position: Point2D<f32>,
+    },
+    RemoveSelectedNodes,
+    ClearGraph,
+    SelectNode {
+        key: NodeKey,
+        multi_select: bool,
+    },
+    SetInteracting {
+        interacting: bool,
+    },
+    SetNodePosition {
+        key: NodeKey,
+        position: Point2D<f32>,
+    },
+    SetZoom {
+        zoom: f32,
+    },
+    SetNodeUrl {
+        key: NodeKey,
+        new_url: String,
+    },
+    WebViewCreated {
+        parent_webview_id: WebViewId,
+        child_webview_id: WebViewId,
+        initial_url: Option<String>,
+    },
+    WebViewUrlChanged {
+        webview_id: WebViewId,
+        new_url: String,
+    },
+    WebViewHistoryChanged {
+        webview_id: WebViewId,
+        entries: Vec<String>,
+        current: usize,
+    },
+    WebViewTitleChanged {
+        webview_id: WebViewId,
+        title: Option<String>,
+    },
+    SetNodeThumbnail {
+        key: NodeKey,
+        png_bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    SetNodeFavicon {
+        key: NodeKey,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+}
+
 /// Main application state
 pub struct GraphBrowserApp {
     /// The graph data structure
     pub graph: Graph,
 
-    /// Physics engine (for local queries, actual simulation runs on worker)
-    pub physics: PhysicsEngine,
+    /// Force-directed layout state owned by app/runtime UI controls.
+    pub physics: FruchtermanReingoldState,
 
-    /// Physics worker thread
-    physics_worker: Option<PhysicsWorker>,
+    /// Physics running state before user drag/pan interaction began.
+    physics_running_before_interaction: Option<bool>,
 
     /// Currently selected nodes (can be multiple)
-    pub selected_nodes: Vec<NodeKey>,
+    pub selected_nodes: SelectionState,
 
     /// Bidirectional mapping between browser tabs and graph nodes
     webview_to_node: HashMap<WebViewId, NodeKey>,
@@ -103,13 +231,6 @@ impl GraphBrowserApp {
 
     /// Create a new graph browser application using a specific persistence directory.
     pub fn new_from_dir(data_dir: PathBuf) -> Self {
-        let physics_config = PhysicsConfig::default();
-
-        // Default viewport diagonal (will be updated on first frame)
-        let viewport_diagonal = 1000.0;
-        let physics = PhysicsEngine::new(physics_config.clone(), viewport_diagonal);
-        let physics_worker = Some(PhysicsWorker::new(physics_config, viewport_diagonal));
-
         // Try to open persistence store and recover graph
         let (graph, persistence) = match GraphStore::open(data_dir) {
             Ok(store) => {
@@ -127,9 +248,9 @@ impl GraphBrowserApp {
 
         Self {
             graph,
-            physics,
-            physics_worker,
-            selected_nodes: Vec::new(),
+            physics: FruchtermanReingoldState::default(),
+            physics_running_before_interaction: None,
+            selected_nodes: SelectionState::new(),
             webview_to_node: HashMap::new(),
             node_to_webview: HashMap::new(),
             active_webview_nodes: Vec::new(),
@@ -148,15 +269,11 @@ impl GraphBrowserApp {
     /// Create a new graph browser application without persistence (for tests)
     #[cfg(test)]
     pub fn new_for_testing() -> Self {
-        let physics_config = PhysicsConfig::default();
-        let viewport_diagonal = 1000.0;
-        let physics = PhysicsEngine::new(physics_config.clone(), viewport_diagonal);
-
         Self {
             graph: Graph::new(),
-            physics,
-            physics_worker: None,
-            selected_nodes: Vec::new(),
+            physics: FruchtermanReingoldState::default(),
+            physics_running_before_interaction: None,
+            selected_nodes: SelectionState::new(),
             webview_to_node: HashMap::new(),
             node_to_webview: HashMap::new(),
             active_webview_nodes: Vec::new(),
@@ -179,68 +296,20 @@ impl GraphBrowserApp {
 
     /// Select a node
     pub fn select_node(&mut self, key: NodeKey, multi_select: bool) {
-        if multi_select {
-            if !self.selected_nodes.contains(&key) {
-                self.selected_nodes.push(key);
-            }
-        } else {
-            // Clear all selections
-            let node_keys: Vec<_> = self.graph.nodes().map(|(key, _)| key).collect();
-            for node_key in node_keys {
-                if let Some(n) = self.graph.get_node_mut(node_key) {
-                    n.is_selected = false;
-                }
-            }
-            self.selected_nodes.clear();
-            self.selected_nodes.push(key);
+        // Ignore stale keys.
+        if self.graph.get_node(key).is_none() {
+            return;
         }
 
-        // Update node selection state
-        if let Some(node) = self.graph.get_node_mut(key) {
-            node.is_selected = true;
-        }
+        self.selected_nodes.select(key, multi_select);
+
+        // Selection changes require egui_graphs state refresh.
+        self.egui_state_dirty = true;
     }
 
     /// Request fit-to-screen on next render frame (one-shot)
     pub fn request_fit_to_screen(&mut self) {
         self.fit_to_screen_requested = true;
-    }
-
-    /// Update physics (call every frame)
-    pub fn update_physics(&mut self, dt: f32) {
-        // Send step command (no graph clone, lightweight)
-        if let Some(worker) = &self.physics_worker {
-            if !self.is_interacting {
-                worker.send_command(PhysicsCommand::Step(dt));
-            }
-
-            // Receive updated positions from worker
-            while let Some(response) = worker.try_recv_response() {
-                match response {
-                    PhysicsResponse::NodePositions(positions) => {
-                        // Update node positions from physics worker
-                        if !self.is_interacting {
-                            for (key, position) in positions {
-                                // Update graph data structure
-                                if let Some(node) = self.graph.get_node_mut(key) {
-                                    node.position = position;
-                                }
-                                
-                                // Update egui_graphs visual positions (no rebuild needed)
-                                if let Some(ref mut egui_state) = self.egui_state {
-                                    if let Some(egui_node) = egui_state.graph.node_mut(key) {
-                                        egui_node.set_location(egui::Pos2::new(position.x, position.y));
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    PhysicsResponse::IsRunning(running) => {
-                        self.physics.is_running = running;
-                    },
-                }
-            }
-        }
     }
 
     /// Set whether the user is actively interacting with the graph
@@ -250,45 +319,195 @@ impl GraphBrowserApp {
         }
         self.is_interacting = interacting;
 
-        if let Some(worker) = &self.physics_worker {
-            if interacting {
-                worker.send_command(PhysicsCommand::Pause);
-                self.physics.is_running = false;
-            } else {
-                self.sync_graph_to_worker();
-                worker.send_command(PhysicsCommand::Resume);
-                self.physics.is_running = true;
-            }
+        if interacting {
+            self.physics_running_before_interaction = Some(self.physics.is_running);
+            self.physics.is_running = false;
+        } else if let Some(was_running) = self.physics_running_before_interaction.take() {
+            self.physics.is_running = was_running;
         }
     }
 
-    /// Sync the full graph to the worker thread (call after structural changes)
-    pub fn sync_graph_to_worker(&self) {
-        if let Some(worker) = &self.physics_worker {
-            worker.send_command(PhysicsCommand::UpdateGraph(self.graph.clone()));
+    /// Apply a batch of intents deterministically in insertion order.
+    pub fn apply_intents<I>(&mut self, intents: I)
+    where
+        I: IntoIterator<Item = GraphIntent>,
+    {
+        for intent in intents {
+            self.apply_intent(intent);
         }
     }
 
-    /// Add a new node and sync graph to worker
+    fn apply_intent(&mut self, intent: GraphIntent) {
+        match intent {
+            GraphIntent::TogglePhysics => self.toggle_physics(),
+            GraphIntent::RequestFitToScreen => self.request_fit_to_screen(),
+            GraphIntent::TogglePhysicsPanel => self.toggle_physics_panel(),
+            GraphIntent::ToggleHelpPanel => self.toggle_help_panel(),
+            GraphIntent::CreateNodeNearCenter => {
+                self.create_new_node_near_center();
+            },
+            GraphIntent::CreateNodeAtUrl { url, position } => {
+                let key = self.add_node_and_sync(url, position);
+                self.select_node(key, false);
+            },
+            GraphIntent::RemoveSelectedNodes => self.remove_selected_nodes(),
+            GraphIntent::ClearGraph => self.clear_graph(),
+            GraphIntent::SelectNode { key, multi_select } => self.select_node(key, multi_select),
+            GraphIntent::SetInteracting { interacting } => self.set_interacting(interacting),
+            GraphIntent::SetNodePosition { key, position } => {
+                if let Some(node) = self.graph.get_node_mut(key) {
+                    node.position = position;
+                }
+            },
+            GraphIntent::SetZoom { zoom } => {
+                self.camera.current_zoom = self.camera.clamp(zoom);
+            },
+            GraphIntent::SetNodeUrl { key, new_url } => {
+                let _ = self.update_node_url_and_log(key, new_url);
+            },
+            GraphIntent::WebViewCreated {
+                parent_webview_id,
+                child_webview_id,
+                initial_url,
+            } => {
+                let parent_node = self.get_node_for_webview(parent_webview_id);
+                let position = if let Some(parent_key) = parent_node {
+                    self.graph
+                        .get_node(parent_key)
+                        .map(|node| Point2D::new(node.position.x + 140.0, node.position.y + 80.0))
+                        .unwrap_or_else(|| Point2D::new(400.0, 300.0))
+                } else {
+                    Point2D::new(400.0, 300.0)
+                };
+                let node_url = initial_url
+                    .filter(|url| !url.is_empty() && url != "about:blank")
+                    .unwrap_or_else(|| self.next_placeholder_url());
+                let child_node = self.add_node_and_sync(node_url, position);
+                self.map_webview_to_node(child_webview_id, child_node);
+                self.promote_node_to_active(child_node);
+                if let Some(parent_key) = parent_node {
+                    let _ = self.add_edge_and_sync(parent_key, child_node, EdgeType::Hyperlink);
+                }
+                self.select_node(child_node, false);
+            },
+            GraphIntent::WebViewUrlChanged {
+                webview_id,
+                new_url,
+            } => {
+                if new_url.is_empty() {
+                    return;
+                }
+                let node_key = if let Some(node_key) = self.get_node_for_webview(webview_id) {
+                    node_key
+                } else {
+                    let node_key =
+                        self.add_node_and_sync(new_url.clone(), Point2D::new(400.0, 300.0));
+                    self.map_webview_to_node(webview_id, node_key);
+                    self.promote_node_to_active(node_key);
+                    node_key
+                };
+                if let Some(node) = self.graph.get_node_mut(node_key) {
+                    node.last_visited = std::time::SystemTime::now();
+                }
+                if self
+                    .graph
+                    .get_node(node_key)
+                    .map(|n| n.url != new_url)
+                    .unwrap_or(false)
+                {
+                    let _ = self.update_node_url_and_log(node_key, new_url);
+                }
+            },
+            GraphIntent::WebViewHistoryChanged {
+                webview_id,
+                entries,
+                current,
+            } => {
+                let Some(node_key) = self.get_node_for_webview(webview_id) else {
+                    return;
+                };
+                if let Some(node) = self.graph.get_node_mut(node_key) {
+                    node.history_entries = entries;
+                    node.history_index = if node.history_entries.is_empty() {
+                        0
+                    } else {
+                        current.min(node.history_entries.len() - 1)
+                    };
+                }
+            },
+            GraphIntent::WebViewTitleChanged { webview_id, title } => {
+                let Some(node_key) = self.get_node_for_webview(webview_id) else {
+                    return;
+                };
+                let Some(title) = title else {
+                    return;
+                };
+                if title.is_empty() {
+                    return;
+                }
+                let mut changed = false;
+                if let Some(node) = self.graph.get_node_mut(node_key) {
+                    if node.title != title {
+                        node.title = title;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    self.log_title_mutation(node_key);
+                    self.egui_state_dirty = true;
+                }
+            },
+            GraphIntent::SetNodeThumbnail {
+                key,
+                png_bytes,
+                width,
+                height,
+            } => {
+                if let Some(node) = self.graph.get_node_mut(key) {
+                    node.thumbnail_png = Some(png_bytes);
+                    node.thumbnail_width = width;
+                    node.thumbnail_height = height;
+                    self.egui_state_dirty = true;
+                }
+            },
+            GraphIntent::SetNodeFavicon {
+                key,
+                rgba,
+                width,
+                height,
+            } => {
+                if let Some(node) = self.graph.get_node_mut(key) {
+                    node.favicon_rgba = Some(rgba);
+                    node.favicon_width = width;
+                    node.favicon_height = height;
+                    self.egui_state_dirty = true;
+                }
+            },
+        }
+    }
+
+    /// Add a new node and mark render state as dirty.
     pub fn add_node_and_sync(
         &mut self,
         url: String,
         position: euclid::default::Point2D<f32>,
     ) -> NodeKey {
-        if let Some(store) = &mut self.persistence {
+        let key = self.graph.add_node(url.clone(), position);
+        if let Some(store) = &mut self.persistence
+            && let Some(node) = self.graph.get_node(key)
+        {
             store.log_mutation(&LogEntry::AddNode {
-                url: url.clone(),
+                node_id: node.id.to_string(),
+                url,
                 position_x: position.x,
                 position_y: position.y,
             });
         }
-        let key = self.graph.add_node(url, position);
-        self.sync_graph_to_worker();
         self.egui_state_dirty = true; // Graph structure changed
         key
     }
 
-    /// Add a new edge and sync graph, with persistence logging
+    /// Add a new edge with persistence logging.
     pub fn add_edge_and_sync(
         &mut self,
         from_key: NodeKey,
@@ -298,7 +517,6 @@ impl GraphBrowserApp {
         let edge_key = self.graph.add_edge(from_key, to_key, edge_type);
         if edge_key.is_some() {
             self.log_edge_mutation(from_key, to_key, edge_type);
-            self.sync_graph_to_worker();
             self.egui_state_dirty = true; // Graph structure changed
         }
         edge_key
@@ -312,23 +530,18 @@ impl GraphBrowserApp {
         edge_type: crate::graph::EdgeType,
     ) {
         if let Some(store) = &mut self.persistence {
-            let from_url = self
-                .graph
-                .get_node(from_key)
-                .map(|n| n.url.clone())
-                .unwrap_or_default();
-            let to_url = self
-                .graph
-                .get_node(to_key)
-                .map(|n| n.url.clone())
-                .unwrap_or_default();
+            let from_id = self.graph.get_node(from_key).map(|n| n.id.to_string());
+            let to_id = self.graph.get_node(to_key).map(|n| n.id.to_string());
+            let (Some(from_node_id), Some(to_node_id)) = (from_id, to_id) else {
+                return;
+            };
             let persisted_type = match edge_type {
                 crate::graph::EdgeType::Hyperlink => PersistedEdgeType::Hyperlink,
                 crate::graph::EdgeType::History => PersistedEdgeType::History,
             };
             store.log_mutation(&LogEntry::AddEdge {
-                from_url,
-                to_url,
+                from_node_id,
+                to_node_id,
                 edge_type: persisted_type,
             });
         }
@@ -339,7 +552,7 @@ impl GraphBrowserApp {
         if let Some(store) = &mut self.persistence {
             if let Some(node) = self.graph.get_node(node_key) {
                 store.log_mutation(&LogEntry::UpdateNodeTitle {
-                    url: node.url.clone(),
+                    node_id: node.id.to_string(),
                     title: node.title.clone(),
                 });
             }
@@ -409,7 +622,8 @@ impl GraphBrowserApp {
         self.next_placeholder_id = next_placeholder_id;
         self.egui_state = None;
         self.egui_state_dirty = true;
-        self.sync_graph_to_worker();
+        self.is_interacting = false;
+        self.physics_running_before_interaction = None;
         Ok(())
     }
 
@@ -444,20 +658,21 @@ impl GraphBrowserApp {
         self.webview_to_node.iter().map(|(&wv, &nk)| (wv, nk))
     }
 
-    /// Toggle physics on the worker thread
+    /// Toggle force-directed layout simulation.
     pub fn toggle_physics(&mut self) {
-        if let Some(worker) = &self.physics_worker {
-            worker.send_command(PhysicsCommand::Toggle);
+        if self.is_interacting {
+            let next = !self
+                .physics_running_before_interaction
+                .unwrap_or(self.physics.is_running);
+            self.physics_running_before_interaction = Some(next);
+            return;
         }
-        self.physics.toggle();
+        self.physics.is_running = !self.physics.is_running;
     }
 
-    /// Update physics configuration
-    pub fn update_physics_config(&mut self, config: PhysicsConfig) {
-        if let Some(worker) = &self.physics_worker {
-            worker.send_command(PhysicsCommand::UpdateConfig(config.clone()));
-        }
-        self.physics.config = config;
+    /// Update force-directed layout configuration.
+    pub fn update_physics_config(&mut self, config: FruchtermanReingoldState) {
+        self.physics = config;
     }
 
     /// Toggle physics config panel visibility
@@ -541,12 +756,12 @@ impl GraphBrowserApp {
 
         let position = Point2D::new(center_x + offset_x, center_y + offset_y);
         let placeholder_url = self.next_placeholder_url();
-        
+
         let key = self.add_node_and_sync(placeholder_url, position);
-        
+
         // Select the newly created node
         self.select_node(key, false);
-        
+
         key
     }
 
@@ -554,14 +769,14 @@ impl GraphBrowserApp {
     /// Note: actual webview closure must be handled by the caller (gui.rs)
     /// since we don't hold a window reference.
     pub fn remove_selected_nodes(&mut self) {
-        let nodes_to_remove: Vec<NodeKey> = self.selected_nodes.clone();
+        let nodes_to_remove: Vec<NodeKey> = self.selected_nodes.iter().copied().collect();
 
         for node_key in nodes_to_remove {
             // Log removal to persistence before removing from graph
             if let Some(store) = &mut self.persistence {
                 if let Some(node) = self.graph.get_node(node_key) {
                     store.log_mutation(&LogEntry::RemoveNode {
-                        url: node.url.clone(),
+                        node_id: node.id.to_string(),
                     });
                 }
             }
@@ -579,15 +794,12 @@ impl GraphBrowserApp {
 
         // Clear selection
         self.selected_nodes.clear();
-
-        // Sync to physics worker
-        self.sync_graph_to_worker();
     }
 
     /// Get the currently selected node (if exactly one is selected)
     pub fn get_single_selected_node(&self) -> Option<NodeKey> {
         if self.selected_nodes.len() == 1 {
-            Some(self.selected_nodes[0])
+            self.selected_nodes.primary()
         } else {
             None
         }
@@ -605,7 +817,6 @@ impl GraphBrowserApp {
         self.webview_to_node.clear();
         self.node_to_webview.clear();
         self.egui_state_dirty = true;
-        self.sync_graph_to_worker();
     }
 
     /// Clear the graph in memory and wipe all persisted graph data.
@@ -622,7 +833,6 @@ impl GraphBrowserApp {
         self.active_webview_nodes.clear();
         self.next_placeholder_id = 0;
         self.egui_state_dirty = true;
-        self.sync_graph_to_worker();
     }
 
     /// Update a node's URL and log to persistence.
@@ -630,10 +840,12 @@ impl GraphBrowserApp {
     pub fn update_node_url_and_log(&mut self, key: NodeKey, new_url: String) -> Option<String> {
         let old_url = self.graph.update_node_url(key, new_url.clone())?;
         if let Some(store) = &mut self.persistence {
-            store.log_mutation(&LogEntry::UpdateNodeUrl {
-                old_url: old_url.clone(),
-                new_url,
-            });
+            if let Some(node) = self.graph.get_node(key) {
+                store.log_mutation(&LogEntry::UpdateNodeUrl {
+                    node_id: node.id.to_string(),
+                    new_url,
+                });
+            }
         }
         self.egui_state_dirty = true;
         Some(old_url)
@@ -651,6 +863,7 @@ mod tests {
     use super::*;
     use euclid::default::Point2D;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     /// Create a unique WebViewId for testing.
     /// Ensures the pipeline namespace is installed on the current thread.
@@ -678,7 +891,6 @@ mod tests {
 
         // Node should be selected
         assert!(app.selected_nodes.contains(&node_key));
-        assert!(app.graph.get_node(node_key).unwrap().is_selected);
     }
 
     #[test]
@@ -708,15 +920,12 @@ mod tests {
 
         assert_eq!(app.selected_nodes.len(), 1);
         assert!(app.selected_nodes.contains(&key));
-        assert!(app.graph.get_node(key).unwrap().is_selected);
     }
 
     #[test]
     fn test_select_node_multi() {
         let mut app = GraphBrowserApp::new_for_testing();
-        let key1 = app
-            .graph
-            .add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let key1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
         let key2 = app
             .graph
             .add_node("b".to_string(), Point2D::new(100.0, 0.0));
@@ -727,6 +936,294 @@ mod tests {
         assert_eq!(app.selected_nodes.len(), 2);
         assert!(app.selected_nodes.contains(&key1));
         assert!(app.selected_nodes.contains(&key2));
+    }
+
+    #[test]
+    fn test_selection_revision_increments_on_change() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
+        let key2 = app.graph.add_node("b".to_string(), Point2D::new(1.0, 0.0));
+        let rev0 = app.selected_nodes.revision();
+
+        app.select_node(key1, false);
+        let rev1 = app.selected_nodes.revision();
+        assert!(rev1 > rev0);
+
+        app.select_node(key1, false);
+        let rev2 = app.selected_nodes.revision();
+        assert_eq!(rev2, rev1);
+
+        app.select_node(key2, true);
+        let rev3 = app.selected_nodes.revision();
+        assert!(rev3 > rev2);
+    }
+
+    #[test]
+    fn test_intent_webview_created_links_parent_and_selects_child() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let parent = app
+            .graph
+            .add_node("https://parent.com".into(), Point2D::new(10.0, 20.0));
+        let parent_wv = test_webview_id();
+        let child_wv = test_webview_id();
+        app.map_webview_to_node(parent_wv, parent);
+
+        let edges_before = app.graph.edge_count();
+        app.apply_intents([GraphIntent::WebViewCreated {
+            parent_webview_id: parent_wv,
+            child_webview_id: child_wv,
+            initial_url: Some("https://child.com".into()),
+        }]);
+
+        assert_eq!(app.graph.edge_count(), edges_before + 1);
+        let child = app.get_node_for_webview(child_wv).unwrap();
+        assert_eq!(app.get_single_selected_node(), Some(child));
+        assert_eq!(app.graph.get_node(child).unwrap().url, "https://child.com");
+    }
+
+    #[test]
+    fn test_intent_webview_created_about_blank_uses_placeholder() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let child_wv = test_webview_id();
+
+        app.apply_intents([GraphIntent::WebViewCreated {
+            parent_webview_id: test_webview_id(),
+            child_webview_id: child_wv,
+            initial_url: Some("about:blank".into()),
+        }]);
+
+        let child = app.get_node_for_webview(child_wv).unwrap();
+        assert!(
+            app.graph
+                .get_node(child)
+                .unwrap()
+                .url
+                .starts_with("about:blank#")
+        );
+    }
+
+    #[test]
+    fn test_intent_webview_url_changed_updates_existing_mapping() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://before.com".into(), Point2D::new(0.0, 0.0));
+        let wv = test_webview_id();
+        app.map_webview_to_node(wv, key);
+
+        app.apply_intents([GraphIntent::WebViewUrlChanged {
+            webview_id: wv,
+            new_url: "https://after.com".into(),
+        }]);
+
+        assert_eq!(app.graph.get_node(key).unwrap().url, "https://after.com");
+        assert_eq!(app.get_node_for_webview(wv), Some(key));
+    }
+
+    #[test]
+    fn test_intent_webview_url_changed_creates_mapping_when_missing() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let wv = test_webview_id();
+        let before = app.graph.node_count();
+
+        app.apply_intents([GraphIntent::WebViewUrlChanged {
+            webview_id: wv,
+            new_url: "https://newly-mapped.com".into(),
+        }]);
+
+        assert_eq!(app.graph.node_count(), before + 1);
+        let key = app.get_node_for_webview(wv).unwrap();
+        assert_eq!(
+            app.graph.get_node(key).unwrap().url,
+            "https://newly-mapped.com"
+        );
+    }
+
+    #[test]
+    fn test_intent_webview_history_changed_clamps_index() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://a.com".into(), Point2D::new(0.0, 0.0));
+        let wv = test_webview_id();
+        app.map_webview_to_node(wv, key);
+
+        app.apply_intents([GraphIntent::WebViewHistoryChanged {
+            webview_id: wv,
+            entries: vec!["https://a.com".into(), "https://b.com".into()],
+            current: 99,
+        }]);
+
+        let node = app.graph.get_node(key).unwrap();
+        assert_eq!(node.history_entries.len(), 2);
+        assert_eq!(node.history_index, 1);
+    }
+
+    #[test]
+    fn test_intent_webview_title_changed_updates_and_ignores_empty() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://title.com".into(), Point2D::new(0.0, 0.0));
+        let wv = test_webview_id();
+        app.map_webview_to_node(wv, key);
+        let original_title = app.graph.get_node(key).unwrap().title.clone();
+
+        app.apply_intents([GraphIntent::WebViewTitleChanged {
+            webview_id: wv,
+            title: Some("".into()),
+        }]);
+        assert_eq!(app.graph.get_node(key).unwrap().title, original_title);
+
+        app.apply_intents([GraphIntent::WebViewTitleChanged {
+            webview_id: wv,
+            title: Some("Hello".into()),
+        }]);
+        assert_eq!(app.graph.get_node(key).unwrap().title, "Hello");
+    }
+
+    #[test]
+    fn test_intent_thumbnail_and_favicon_update_node_metadata() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://assets.com".into(), Point2D::new(0.0, 0.0));
+
+        app.apply_intents([
+            GraphIntent::SetNodeThumbnail {
+                key,
+                png_bytes: vec![1, 2, 3],
+                width: 10,
+                height: 20,
+            },
+            GraphIntent::SetNodeFavicon {
+                key,
+                rgba: vec![255, 0, 0, 255],
+                width: 1,
+                height: 1,
+            },
+        ]);
+
+        let node = app.graph.get_node(key).unwrap();
+        assert_eq!(node.thumbnail_png.as_ref().unwrap().len(), 3);
+        assert_eq!(node.thumbnail_width, 10);
+        assert_eq!(node.thumbnail_height, 20);
+        assert_eq!(node.favicon_rgba.as_ref().unwrap().len(), 4);
+        assert_eq!(node.favicon_width, 1);
+        assert_eq!(node.favicon_height, 1);
+    }
+
+    #[test]
+    fn test_conflict_delete_dominates_title_update_any_order() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://conflict-a.com".into(), Point2D::new(0.0, 0.0));
+        let wv = test_webview_id();
+        app.map_webview_to_node(wv, key);
+        app.select_node(key, false);
+        app.apply_intents([
+            GraphIntent::RemoveSelectedNodes,
+            GraphIntent::WebViewTitleChanged {
+                webview_id: wv,
+                title: Some("updated".into()),
+            },
+        ]);
+        assert!(app.graph.get_node(key).is_none());
+
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://conflict-b.com".into(), Point2D::new(0.0, 0.0));
+        let wv = test_webview_id();
+        app.map_webview_to_node(wv, key);
+        app.select_node(key, false);
+        app.apply_intents([
+            GraphIntent::WebViewTitleChanged {
+                webview_id: wv,
+                title: Some("updated".into()),
+            },
+            GraphIntent::RemoveSelectedNodes,
+        ]);
+        assert!(app.graph.get_node(key).is_none());
+    }
+
+    #[test]
+    fn test_conflict_delete_dominates_metadata_updates() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://conflict-meta.com".into(), Point2D::new(0.0, 0.0));
+        let wv = test_webview_id();
+        app.map_webview_to_node(wv, key);
+        app.select_node(key, false);
+
+        app.apply_intents([
+            GraphIntent::RemoveSelectedNodes,
+            GraphIntent::WebViewHistoryChanged {
+                webview_id: wv,
+                entries: vec!["https://x.com".into()],
+                current: 0,
+            },
+            GraphIntent::SetNodeThumbnail {
+                key,
+                png_bytes: vec![1, 2, 3],
+                width: 8,
+                height: 8,
+            },
+            GraphIntent::SetNodeFavicon {
+                key,
+                rgba: vec![0, 0, 0, 255],
+                width: 1,
+                height: 1,
+            },
+            GraphIntent::SetNodeUrl {
+                key,
+                new_url: "https://should-not-apply.com".into(),
+            },
+        ]);
+
+        assert!(app.graph.get_node(key).is_none());
+    }
+
+    #[test]
+    fn test_conflict_last_writer_wins_for_url_updates() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://start.com".into(), Point2D::new(0.0, 0.0));
+        app.apply_intents([
+            GraphIntent::SetNodeUrl {
+                key,
+                new_url: "https://first.com".into(),
+            },
+            GraphIntent::SetNodeUrl {
+                key,
+                new_url: "https://second.com".into(),
+            },
+        ]);
+        assert_eq!(app.graph.get_node(key).unwrap().url, "https://second.com");
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_apply_intent_batch_10k_under_budget() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let mut intents = Vec::new();
+        for i in 0..10_000 {
+            intents.push(GraphIntent::CreateNodeAtUrl {
+                url: format!("https://perf/{i}"),
+                position: Point2D::new((i % 100) as f32, (i / 100) as f32),
+            });
+        }
+        let start = std::time::Instant::now();
+        app.apply_intents(intents);
+        let elapsed = start.elapsed();
+        assert_eq!(app.graph.node_count(), 10_000);
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "intent batch exceeded budget: {elapsed:?}"
+        );
     }
 
     #[test]
@@ -820,7 +1317,9 @@ mod tests {
     fn test_remove_selected_nodes_single() {
         let mut app = GraphBrowserApp::new_for_testing();
         let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
-        let _k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+        let _k2 = app
+            .graph
+            .add_node("b".to_string(), Point2D::new(100.0, 0.0));
 
         app.select_node(k1, false);
         app.remove_selected_nodes();
@@ -834,8 +1333,12 @@ mod tests {
     fn test_remove_selected_nodes_multi() {
         let mut app = GraphBrowserApp::new_for_testing();
         let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
-        let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
-        let k3 = app.graph.add_node("c".to_string(), Point2D::new(200.0, 0.0));
+        let k2 = app
+            .graph
+            .add_node("b".to_string(), Point2D::new(100.0, 0.0));
+        let k3 = app
+            .graph
+            .add_node("c".to_string(), Point2D::new(200.0, 0.0));
 
         app.select_node(k1, false);
         app.select_node(k2, true);
@@ -880,7 +1383,9 @@ mod tests {
     fn test_clear_graph_resets_everything() {
         let mut app = GraphBrowserApp::new_for_testing();
         let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
-        let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+        let k2 = app
+            .graph
+            .add_node("b".to_string(), Point2D::new(100.0, 0.0));
 
         app.select_node(k1, false);
         app.select_node(k2, false);
@@ -912,7 +1417,9 @@ mod tests {
     #[test]
     fn test_create_new_node_near_center_selects_node() {
         let mut app = GraphBrowserApp::new_for_testing();
-        let k1 = app.graph.add_node("existing".to_string(), Point2D::new(0.0, 0.0));
+        let k1 = app
+            .graph
+            .add_node("existing".to_string(), Point2D::new(0.0, 0.0));
         app.select_node(k1, false);
 
         let k2 = app.create_new_node_near_center();
@@ -1003,7 +1510,9 @@ mod tests {
     fn test_webview_node_mappings_iterator() {
         let mut app = GraphBrowserApp::new_for_testing();
         let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
-        let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+        let k2 = app
+            .graph
+            .add_node("b".to_string(), Point2D::new(100.0, 0.0));
         let wv1 = test_webview_id();
         let wv2 = test_webview_id();
 
@@ -1035,7 +1544,9 @@ mod tests {
     fn test_get_single_selected_node_multi() {
         let mut app = GraphBrowserApp::new_for_testing();
         let k1 = app.graph.add_node("a".to_string(), Point2D::new(0.0, 0.0));
-        let k2 = app.graph.add_node("b".to_string(), Point2D::new(100.0, 0.0));
+        let k2 = app
+            .graph
+            .add_node("b".to_string(), Point2D::new(100.0, 0.0));
         app.select_node(k1, false);
         app.select_node(k2, true);
 
@@ -1047,7 +1558,9 @@ mod tests {
     #[test]
     fn test_update_node_url_and_log() {
         let mut app = GraphBrowserApp::new_for_testing();
-        let key = app.graph.add_node("old-url".to_string(), Point2D::new(0.0, 0.0));
+        let key = app
+            .graph
+            .add_node("old-url".to_string(), Point2D::new(0.0, 0.0));
 
         let old = app.update_node_url_and_log(key, "new-url".to_string());
 
@@ -1073,19 +1586,23 @@ mod tests {
 
         {
             let mut store = GraphStore::open(path.clone()).unwrap();
+            let id_a = Uuid::new_v4();
+            let id_b = Uuid::new_v4();
             store.log_mutation(&LogEntry::AddNode {
+                node_id: id_a.to_string(),
                 url: "https://a.com".to_string(),
                 position_x: 10.0,
                 position_y: 20.0,
             });
             store.log_mutation(&LogEntry::AddNode {
+                node_id: id_b.to_string(),
                 url: "https://b.com".to_string(),
                 position_x: 30.0,
                 position_y: 40.0,
             });
             store.log_mutation(&LogEntry::AddEdge {
-                from_url: "https://a.com".to_string(),
-                to_url: "https://b.com".to_string(),
+                from_node_id: id_a.to_string(),
+                to_node_id: id_b.to_string(),
                 edge_type: PersistedEdgeType::Hyperlink,
             });
         }
@@ -1105,7 +1622,9 @@ mod tests {
 
         {
             let mut store = GraphStore::open(path.clone()).unwrap();
+            let id = Uuid::new_v4();
             store.log_mutation(&LogEntry::AddNode {
+                node_id: id.to_string(),
                 url: "about:blank#5".to_string(),
                 position_x: 0.0,
                 position_y: 0.0,
@@ -1159,6 +1678,7 @@ mod tests {
         {
             let mut store_a = GraphStore::open(path_a.clone()).unwrap();
             store_a.log_mutation(&LogEntry::AddNode {
+                node_id: Uuid::new_v4().to_string(),
                 url: "https://from-a.com".to_string(),
                 position_x: 1.0,
                 position_y: 2.0,
@@ -1167,11 +1687,13 @@ mod tests {
         {
             let mut store_b = GraphStore::open(path_b.clone()).unwrap();
             store_b.log_mutation(&LogEntry::AddNode {
+                node_id: Uuid::new_v4().to_string(),
                 url: "https://from-b.com".to_string(),
                 position_x: 3.0,
                 position_y: 4.0,
             });
             store_b.log_mutation(&LogEntry::AddNode {
+                node_id: Uuid::new_v4().to_string(),
                 url: "about:blank#7".to_string(),
                 position_x: 5.0,
                 position_y: 6.0,
@@ -1189,7 +1711,10 @@ mod tests {
         assert!(app.selected_nodes.is_empty());
 
         let new_placeholder = app.create_new_node_near_center();
-        assert_eq!(app.graph.get_node(new_placeholder).unwrap().url, "about:blank#8");
+        assert_eq!(
+            app.graph.get_node(new_placeholder).unwrap().url,
+            "about:blank#8"
+        );
     }
 
     #[test]

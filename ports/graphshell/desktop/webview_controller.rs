@@ -8,19 +8,56 @@
 //! testable functions. All Servo WebView operations (create, close,
 //! sync to graph nodes) live here.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use servo::WebViewId;
 use url::Url;
 
-use crate::app::GraphBrowserApp;
-use crate::graph::{EdgeType, NodeKey};
+use crate::app::{GraphBrowserApp, GraphIntent};
+use crate::graph::NodeKey;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::window::ServoShellWindow;
 
-pub(crate) struct SyncToGraphResult {
-    pub remapped_nodes: Vec<(NodeKey, NodeKey)>,
+fn reconcile_mappings_and_selection(
+    app: &mut GraphBrowserApp,
+    seen_webviews: &HashSet<WebViewId>,
+    active_webview: Option<WebViewId>,
+) {
+    // Highlight the active tab's node (reuse reducer intent for consistency).
+    if let Some(active_wv_id) = active_webview
+        && let Some(active_node_key) = app.get_node_for_webview(active_wv_id)
+    {
+        app.apply_intents([GraphIntent::SelectNode {
+            key: active_node_key,
+            multi_select: false,
+        }]);
+    }
+
+    // Clean up mappings for webviews that no longer exist.
+    let old_webviews: Vec<WebViewId> = app
+        .webview_node_mappings()
+        .filter(|(wv_id, _)| !seen_webviews.contains(wv_id))
+        .map(|(wv_id, _)| wv_id)
+        .collect();
+
+    for wv_id in old_webviews {
+        app.unmap_webview(wv_id);
+    }
+}
+
+fn apply_graph_view_address_submit(app: &mut GraphBrowserApp, url: &str) {
+    if let Some(selected_node) = app.get_single_selected_node() {
+        app.apply_intents([GraphIntent::SetNodeUrl {
+            key: selected_node,
+            new_url: url.to_string(),
+        }]);
+    } else {
+        app.apply_intents([GraphIntent::CreateNodeAtUrl {
+            url: url.to_string(),
+            position: euclid::default::Point2D::new(400.0, 300.0),
+        }]);
+    }
 }
 
 /// Manage webview lifecycle based on current view.
@@ -91,14 +128,12 @@ pub(crate) fn manage_lifecycle(
             app.active_webview_nodes.clear();
         } else if app.get_webview_for_node(active_node).is_none() {
             // No saved nodes, just create webview for active node
-            if let (Some(node), Some(app_state)) =
-                (app.graph.get_node(active_node), state.as_ref())
+            if let (Some(node), Some(app_state)) = (app.graph.get_node(active_node), state.as_ref())
             {
-                let url = Url::parse(&node.url)
-                    .unwrap_or_else(|_| Url::parse("about:blank").unwrap());
+                let url =
+                    Url::parse(&node.url).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
 
-                let webview =
-                    window.create_and_activate_toplevel_webview(app_state.clone(), url);
+                let webview = window.create_and_activate_toplevel_webview(app_state.clone(), url);
 
                 app.map_webview_to_node(webview.id(), active_node);
                 app.promote_node_to_active(active_node);
@@ -110,151 +145,24 @@ pub(crate) fn manage_lifecycle(
     }
 }
 
-/// Sync all webviews to graph nodes.
+/// Sync existing webviews to graph mappings.
 ///
-/// Creates nodes for new pages, updates titles, detects URL changes
-/// (creating edges), and cleans up stale webview mappings.
-/// Only call in detail view (graph view has no webviews).
-pub(crate) fn sync_to_graph(
-    app: &mut GraphBrowserApp,
-    previous_urls: &mut HashMap<WebViewId, Url>,
-    window: &ServoShellWindow,
-) -> SyncToGraphResult {
-    use euclid::default::Point2D;
-    let mut remapped_nodes = Vec::new();
-
-    // Collect all webviews and their current URLs
-    let webviews: Vec<(WebViewId, Option<Url>, Option<String>)> = window
-        .webviews()
-        .into_iter()
-        .map(|(wv_id, wv)| {
-            let url = wv.url();
-            let title = wv.page_title();
-            (wv_id, url, title)
-        })
-        .collect();
-
-    // Track which webviews we've seen (to remove stale mappings later)
-    let mut seen_webviews = std::collections::HashSet::new();
-
-    for (wv_id, url_opt, title_opt) in webviews {
+/// This is now structural-reconciliation only (cleanup + active highlight).
+/// Structural graph creation and navigation semantics are handled by Servo
+/// delegate events routed through GraphIntent reducer paths.
+pub(crate) fn sync_to_graph(app: &mut GraphBrowserApp, window: &ServoShellWindow) {
+    // Track which webviews we've seen (to remove stale mappings later).
+    let mut seen_webviews = HashSet::new();
+    for (wv_id, _) in window.webviews().into_iter() {
         seen_webviews.insert(wv_id);
-
-        let Some(url) = url_opt else { continue };
-        if url.as_str() == "about:blank" {
-            continue;
-        }
-
-        if let Some(node_key) = app.get_node_for_webview(wv_id) {
-            // Update existing node
-            let mut title_changed = false;
-            if let Some(node) = app.graph.get_node_mut(node_key) {
-                if let Some(title) = title_opt.as_ref() {
-                    if !title.is_empty() && &node.title != title {
-                        node.title = title.clone();
-                        title_changed = true;
-                    }
-                }
-                node.last_visited = std::time::SystemTime::now();
-            }
-            if title_changed {
-                app.log_title_mutation(node_key);
-            }
-
-            // Check if URL changed (navigation event)
-            if let Some(previous_url) = previous_urls.get(&wv_id) {
-                if previous_url != &url {
-                    let from_key = node_key;
-
-                    // Always create a NEW node for the new URL
-                    let new_pos = Point2D::new(400.0, 300.0);
-                    let to_key = app.add_node_and_sync(url.to_string(), new_pos);
-
-                    app.map_webview_to_node(wv_id, to_key);
-                    remapped_nodes.push((from_key, to_key));
-
-                    if let Some(title) = title_opt.as_ref() {
-                        if let Some(node) = app.graph.get_node_mut(to_key) {
-                            node.title = title.clone();
-                        }
-                    }
-
-                    // Create edge from old node to new node
-                    if from_key != to_key {
-                        let existing_forward = app.graph.has_edge_between(from_key, to_key);
-                        if !existing_forward {
-                            let existing_backward =
-                                app.graph.has_edge_between(to_key, from_key);
-                            let edge_type = if existing_backward {
-                                EdgeType::History
-                            } else {
-                                EdgeType::Hyperlink
-                            };
-                            app.add_edge_and_sync(from_key, to_key, edge_type);
-                        }
-                    }
-
-                    previous_urls.insert(wv_id, url.clone());
-                }
-            } else {
-                // First time seeing this webview — track its URL
-                previous_urls.insert(wv_id, url.clone());
-            }
-        } else {
-            // No node exists for this webview — find or create one
-            let node_key =
-                if let Some((existing_key, _)) = app.graph.get_node_by_url(&url.to_string()) {
-                    let is_mapped = app.webview_node_mappings().any(|(_, nk)| nk == existing_key);
-                    if !is_mapped {
-                        existing_key
-                    } else {
-                        let pos = Point2D::new(400.0, 300.0);
-                        app.add_node_and_sync(url.to_string(), pos)
-                    }
-                } else {
-                    let pos = Point2D::new(400.0, 300.0);
-                    app.add_node_and_sync(url.to_string(), pos)
-                };
-
-            if let Some(title) = title_opt {
-                if let Some(node) = app.graph.get_node_mut(node_key) {
-                    node.title = title;
-                }
-            }
-
-            app.map_webview_to_node(wv_id, node_key);
-            previous_urls.insert(wv_id, url);
-        }
     }
-
-    // Highlight the active tab's node (reuse select_node to avoid duplicating
-    // the selection-clearing loop)
-    if let Some(active_wv_id) = window.webview_collection.borrow().active_id() {
-        if let Some(active_node_key) = app.get_node_for_webview(active_wv_id) {
-            app.select_node(active_node_key, false);
-        }
-    }
-
-    // Clean up mappings for webviews that no longer exist
-    let old_webviews: Vec<WebViewId> = app
-        .webview_node_mappings()
-        .filter(|(wv_id, _)| !seen_webviews.contains(wv_id))
-        .map(|(wv_id, _)| wv_id)
-        .collect();
-
-    for wv_id in old_webviews {
-        app.unmap_webview(wv_id);
-        previous_urls.remove(&wv_id);
-    }
-
-    SyncToGraphResult { remapped_nodes }
+    let active = window.webview_collection.borrow().active_id();
+    reconcile_mappings_and_selection(app, &seen_webviews, active);
 }
 
 /// Handle address bar submission (Enter key).
 ///
-/// - **Graph view**: Update selected node's URL (persisted + `url_to_node`
-///   updated), pre-seed `previous_urls` to prevent phantom-node creation,
-///   then select/open the node in tile-driven detail mode.
+/// - **Graph view**: Update selected node URL in-place, or create a new node.
 /// - **Detail view**: Queue a navigation command.
 ///
 /// Returns `true` if the location field should be marked as clean
@@ -263,33 +171,10 @@ pub(crate) fn handle_address_bar_submit(
     app: &mut GraphBrowserApp,
     url: &str,
     is_graph_view: bool,
-    previous_urls: &mut HashMap<WebViewId, Url>,
     window: &ServoShellWindow,
 ) -> bool {
     if is_graph_view {
-        if let Some(selected_node) = app.get_single_selected_node() {
-            // Update URL via the persistence-aware path (fixes BUG-3)
-            app.update_node_url_and_log(selected_node, url.to_string());
-
-            // Pre-seed previous_urls so sync_to_graph doesn't see a URL
-            // mismatch and create a phantom duplicate node (fixes BUG-4)
-            if let Some(wv_id) = app.get_webview_for_node(selected_node) {
-                if let Ok(parsed) = Url::parse(url) {
-                    previous_urls.insert(wv_id, parsed);
-                }
-            }
-
-            // Keep graph selection in sync; GUI tile flow decides whether to
-            // open/focus a WebView tile.
-            app.select_node(selected_node, false);
-        } else {
-            // No node selected — create a new node with the URL
-            let key = app.add_node_and_sync(
-                url.to_string(),
-                euclid::default::Point2D::new(400.0, 300.0),
-            );
-            app.select_node(key, false);
-        }
+        apply_graph_view_address_submit(app, url);
         true
     } else {
         window.queue_user_interface_command(UserInterfaceCommand::Go(url.to_string()));
@@ -315,9 +200,82 @@ pub(crate) fn close_webviews_for_nodes(
 
 /// Close all current webviews and clear their app mappings.
 pub(crate) fn close_all_webviews(app: &mut GraphBrowserApp, window: &ServoShellWindow) {
-    let webviews_to_close: Vec<WebViewId> = window.webviews().into_iter().map(|(id, _)| id).collect();
+    let webviews_to_close: Vec<WebViewId> =
+        window.webviews().into_iter().map(|(id, _)| id).collect();
     for wv_id in webviews_to_close {
         window.close_webview(wv_id);
         app.unmap_webview(wv_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use euclid::default::Point2D;
+
+    /// Create a unique WebViewId for testing.
+    fn test_webview_id() -> servo::WebViewId {
+        thread_local! {
+            static NS_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        NS_INSTALLED.with(|cell| {
+            if !cell.get() {
+                base::id::PipelineNamespace::install(base::id::PipelineNamespaceId(43));
+                cell.set(true);
+            }
+        });
+        servo::WebViewId::new(base::id::PainterId::next())
+    }
+
+    #[test]
+    fn test_reconcile_mappings_removes_stale_webviews() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let n1 = app
+            .graph
+            .add_node("https://a.com".into(), Point2D::new(0.0, 0.0));
+        let n2 = app
+            .graph
+            .add_node("https://b.com".into(), Point2D::new(1.0, 1.0));
+        let w1 = test_webview_id();
+        let w2 = test_webview_id();
+        app.map_webview_to_node(w1, n1);
+        app.map_webview_to_node(w2, n2);
+
+        let mut seen = HashSet::new();
+        seen.insert(w1);
+        reconcile_mappings_and_selection(&mut app, &seen, Some(w1));
+
+        assert_eq!(app.get_node_for_webview(w1), Some(n1));
+        assert_eq!(app.get_node_for_webview(w2), None);
+        assert_eq!(app.get_single_selected_node(), Some(n1));
+    }
+
+    #[test]
+    fn test_apply_graph_view_submit_updates_selected_node_url() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://old.com".into(), Point2D::new(0.0, 0.0));
+        app.select_node(key, false);
+
+        apply_graph_view_address_submit(&mut app, "https://new.com");
+
+        let node = app.graph.get_node(key).unwrap();
+        assert_eq!(node.url, "https://new.com");
+    }
+
+    #[test]
+    fn test_apply_graph_view_submit_creates_node_when_none_selected() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let before = app.graph.node_count();
+
+        apply_graph_view_address_submit(&mut app, "https://created.com");
+
+        assert_eq!(app.graph.node_count(), before + 1);
+        let selected = app.get_single_selected_node().unwrap();
+        assert_eq!(
+            app.graph.get_node(selected).unwrap().url,
+            "https://created.com"
+        );
     }
 }

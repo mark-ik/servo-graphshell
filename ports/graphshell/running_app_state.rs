@@ -428,8 +428,8 @@ impl RunningAppState {
 
         // When no more windows are open, exit the application. Do not do this when
         // running WebDriver, which expects to keep running with no WebView open.
-        if self.servoshell_preferences.webdriver_port.get().is_none() &&
-            self.windows.borrow().is_empty()
+        if self.servoshell_preferences.webdriver_port.get().is_none()
+            && self.windows.borrow().is_empty()
         {
             self.schedule_exit()
         }
@@ -670,12 +670,19 @@ impl WebViewDelegate for RunningAppState {
         self.window_for_webview_id(webview.id()).set_needs_update();
     }
 
-    fn notify_history_changed(&self, webview: WebView, _entries: Vec<Url>, _current: usize) {
-        self.window_for_webview_id(webview.id()).set_needs_update();
+    fn notify_url_changed(&self, webview: WebView, url: Url) {
+        let window = self.window_for_webview_id(webview.id());
+        window.notify_url_changed(webview, url);
     }
 
-    fn notify_page_title_changed(&self, webview: WebView, _: Option<String>) {
-        self.window_for_webview_id(webview.id()).set_needs_update();
+    fn notify_history_changed(&self, webview: WebView, entries: Vec<Url>, current: usize) {
+        let window = self.window_for_webview_id(webview.id());
+        window.notify_history_changed(webview, entries, current);
+    }
+
+    fn notify_page_title_changed(&self, webview: WebView, title: Option<String>) {
+        let window = self.window_for_webview_id(webview.id());
+        window.notify_page_title_changed(webview, title);
     }
 
     fn notify_traversal_complete(&self, _webview: WebView, traversal_id: TraversalId) {
@@ -716,6 +723,7 @@ impl WebViewDelegate for RunningAppState {
 
         webview.notify_theme_change(platform_window.theme());
         window.add_webview(webview.clone());
+        window.notify_create_new_webview(parent_webview, webview.clone());
 
         // When WebDriver is enabled, do not focus and raise the WebView to the top,
         // as that is what the specification expects. Otherwise, we would like `window.open()`
@@ -751,9 +759,11 @@ impl WebViewDelegate for RunningAppState {
     }
 
     fn notify_load_status_changed(&self, webview: WebView, status: LoadStatus) {
-        self.window_for_webview_id(webview.id()).set_needs_update();
+        let window = self.window_for_webview_id(webview.id());
+        window.set_needs_update();
 
         if status == LoadStatus::Complete {
+            window.notify_load_status_complete(webview.clone());
             if let Some(sender) = self
                 .webdriver_senders
                 .borrow_mut()

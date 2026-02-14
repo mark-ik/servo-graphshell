@@ -38,6 +38,29 @@ impl From<u64> for ServoShellWindowId {
     }
 }
 
+/// Graph-relevant semantic events emitted from Servo delegate callbacks.
+#[derive(Clone, Debug)]
+pub(crate) enum GraphSemanticEvent {
+    UrlChanged {
+        webview_id: WebViewId,
+        new_url: String,
+    },
+    HistoryChanged {
+        webview_id: WebViewId,
+        entries: Vec<String>,
+        current: usize,
+    },
+    PageTitleChanged {
+        webview_id: WebViewId,
+        title: Option<String>,
+    },
+    CreateNewWebView {
+        parent_webview_id: WebViewId,
+        child_webview_id: WebViewId,
+        initial_url: Option<String>,
+    },
+}
+
 pub(crate) struct ServoShellWindow {
     /// The [`WebView`]s that have been added to this window.
     pub(crate) webview_collection: RefCell<WebViewCollection>,
@@ -53,6 +76,11 @@ pub(crate) struct ServoShellWindow {
     /// List of webviews that have favicon textures which are not yet uploaded
     /// to the GPU by egui.
     pending_favicon_loads: RefCell<Vec<WebViewId>>,
+    /// List of webviews that have reached `LoadStatus::Complete` and should
+    /// schedule a thumbnail capture in the GUI.
+    pending_thumbnail_capture_requests: RefCell<Vec<WebViewId>>,
+    /// Pending graph semantic events emitted from delegate callbacks.
+    pending_graph_events: RefCell<Vec<GraphSemanticEvent>>,
     /// Pending [`UserInterfaceCommand`] that have yet to be processed by the main loop.
     pending_commands: RefCell<Vec<UserInterfaceCommand>>,
 }
@@ -66,6 +94,8 @@ impl ServoShellWindow {
             needs_update: Default::default(),
             needs_repaint: Default::default(),
             pending_favicon_loads: Default::default(),
+            pending_thumbnail_capture_requests: Default::default(),
+            pending_graph_events: Default::default(),
             pending_commands: Default::default(),
         }
     }
@@ -85,7 +115,11 @@ impl ServoShellWindow {
     }
 
     pub(crate) fn create_toplevel_webview(&self, state: Rc<RunningAppState>, url: Url) -> WebView {
-        self.create_toplevel_webview_with_context(state, url, self.platform_window.rendering_context())
+        self.create_toplevel_webview_with_context(
+            state,
+            url,
+            self.platform_window.rendering_context(),
+        )
     }
 
     pub(crate) fn create_toplevel_webview_with_context(
@@ -205,8 +239,9 @@ impl ServoShellWindow {
     }
 
     pub(crate) fn update_and_request_repaint_if_necessary(&self, state: &RunningAppState) {
-        let updated_user_interface = self.needs_update.take() &&
-            self.platform_window
+        let updated_user_interface = self.needs_update.take()
+            && self
+                .platform_window
                 .update_user_interface_state(state, self);
 
         // Delegate handlers may have asked us to present or update painted WebView contents.
@@ -238,6 +273,64 @@ impl ServoShellWindow {
         self.set_needs_repaint();
     }
 
+    pub(crate) fn notify_load_status_complete(&self, webview: WebView) {
+        self.pending_thumbnail_capture_requests
+            .borrow_mut()
+            .push(webview.id());
+        self.set_needs_repaint();
+    }
+
+    pub(crate) fn notify_url_changed(&self, webview: WebView, new_url: Url) {
+        self.pending_graph_events
+            .borrow_mut()
+            .push(GraphSemanticEvent::UrlChanged {
+                webview_id: webview.id(),
+                new_url: new_url.to_string(),
+            });
+        self.set_needs_update();
+    }
+
+    pub(crate) fn notify_history_changed(
+        &self,
+        webview: WebView,
+        entries: Vec<Url>,
+        current: usize,
+    ) {
+        self.pending_graph_events
+            .borrow_mut()
+            .push(GraphSemanticEvent::HistoryChanged {
+                webview_id: webview.id(),
+                entries: entries.into_iter().map(|u| u.to_string()).collect(),
+                current,
+            });
+        self.set_needs_update();
+    }
+
+    pub(crate) fn notify_page_title_changed(&self, webview: WebView, title: Option<String>) {
+        self.pending_graph_events
+            .borrow_mut()
+            .push(GraphSemanticEvent::PageTitleChanged {
+                webview_id: webview.id(),
+                title,
+            });
+        self.set_needs_update();
+    }
+
+    pub(crate) fn notify_create_new_webview(
+        &self,
+        parent_webview: WebView,
+        child_webview: WebView,
+    ) {
+        self.pending_graph_events
+            .borrow_mut()
+            .push(GraphSemanticEvent::CreateNewWebView {
+                parent_webview_id: parent_webview.id(),
+                child_webview_id: child_webview.id(),
+                initial_url: child_webview.url().map(|u| u.to_string()),
+            });
+        self.set_needs_update();
+    }
+
     #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
     pub(crate) fn hidpi_scale_factor_changed(&self) {
         let new_scale_factor = self.platform_window.hidpi_scale_factor();
@@ -266,6 +359,17 @@ impl ServoShellWindow {
     #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
     pub(crate) fn take_pending_favicon_loads(&self) -> Vec<WebViewId> {
         std::mem::take(&mut *self.pending_favicon_loads.borrow_mut())
+    }
+
+    /// Return webviews that should schedule thumbnail capture.
+    #[cfg_attr(any(target_os = "android", target_env = "ohos"), expect(dead_code))]
+    pub(crate) fn take_pending_thumbnail_capture_requests(&self) -> Vec<WebViewId> {
+        std::mem::take(&mut *self.pending_thumbnail_capture_requests.borrow_mut())
+    }
+
+    /// Return all pending graph semantic events.
+    pub(crate) fn take_pending_graph_events(&self) -> Vec<GraphSemanticEvent> {
+        std::mem::take(&mut *self.pending_graph_events.borrow_mut())
     }
 
     pub(crate) fn show_embedder_control(

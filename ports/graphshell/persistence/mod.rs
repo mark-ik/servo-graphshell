@@ -17,6 +17,7 @@ use redb::ReadableDatabase;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use types::{GraphSnapshot, LogEntry};
+use uuid::Uuid;
 
 const SNAPSHOT_TABLE: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("snapshots");
 const TILE_LAYOUT_TABLE: redb::TableDefinition<&str, &[u8]> =
@@ -220,7 +221,9 @@ impl GraphStore {
         let read_txn = self.snapshot_db.begin_read().ok()?;
         let table = read_txn.open_table(TILE_LAYOUT_TABLE).ok()?;
         let entry = table.get("latest").ok()??;
-        std::str::from_utf8(entry.value()).ok().map(|s| s.to_string())
+        std::str::from_utf8(entry.value())
+            .ok()
+            .map(|s| s.to_string())
     }
 
     fn load_snapshot(&self) -> Option<GraphSnapshot> {
@@ -253,26 +256,37 @@ impl GraphStore {
 
             match archived {
                 ArchivedLogEntry::AddNode {
+                    node_id,
                     url,
                     position_x,
                     position_y,
                 } => {
-                    if graph.get_node_by_url(url.as_str()).is_none() {
+                    let Ok(node_id) = Uuid::parse_str(node_id.as_str()) else {
+                        continue;
+                    };
+                    if graph.get_node_key_by_id(node_id).is_none() {
                         let px: f32 = (*position_x).into();
                         let py: f32 = (*position_y).into();
-                        graph.add_node(
+                        graph.add_node_with_id(
+                            node_id,
                             url.to_string(),
                             euclid::default::Point2D::new(px, py),
                         );
                     }
                 },
                 ArchivedLogEntry::AddEdge {
-                    from_url,
-                    to_url,
+                    from_node_id,
+                    to_node_id,
                     edge_type,
                 } => {
-                    let from = graph.get_node_by_url(from_url.as_str()).map(|(key, _)| key);
-                    let to = graph.get_node_by_url(to_url.as_str()).map(|(key, _)| key);
+                    let Ok(from_node_id) = Uuid::parse_str(from_node_id.as_str()) else {
+                        continue;
+                    };
+                    let Ok(to_node_id) = Uuid::parse_str(to_node_id.as_str()) else {
+                        continue;
+                    };
+                    let from = graph.get_node_key_by_id(from_node_id);
+                    let to = graph.get_node_key_by_id(to_node_id);
                     if let (Some(from_key), Some(to_key)) = (from, to) {
                         let et = match edge_type {
                             types::ArchivedPersistedEdgeType::Hyperlink => {
@@ -285,30 +299,42 @@ impl GraphStore {
                         graph.add_edge(from_key, to_key, et);
                     }
                 },
-                ArchivedLogEntry::UpdateNodeTitle { url, title } => {
-                    if let Some((key, _)) = graph.get_node_by_url(url.as_str()) {
-                        if let Some(node_mut) = graph.get_node_mut(key) {
-                            node_mut.title = title.to_string();
-                        }
+                ArchivedLogEntry::UpdateNodeTitle { node_id, title } => {
+                    let Ok(node_id) = Uuid::parse_str(node_id.as_str()) else {
+                        continue;
+                    };
+                    if let Some(key) = graph.get_node_key_by_id(node_id)
+                        && let Some(node_mut) = graph.get_node_mut(key)
+                    {
+                        node_mut.title = title.to_string();
                     }
                 },
-                ArchivedLogEntry::PinNode { url, is_pinned } => {
-                    if let Some((key, _)) = graph.get_node_by_url(url.as_str()) {
-                        if let Some(node_mut) = graph.get_node_mut(key) {
-                            node_mut.is_pinned = *is_pinned;
-                        }
+                ArchivedLogEntry::PinNode { node_id, is_pinned } => {
+                    let Ok(node_id) = Uuid::parse_str(node_id.as_str()) else {
+                        continue;
+                    };
+                    if let Some(key) = graph.get_node_key_by_id(node_id)
+                        && let Some(node_mut) = graph.get_node_mut(key)
+                    {
+                        node_mut.is_pinned = *is_pinned;
                     }
                 },
-                ArchivedLogEntry::RemoveNode { url } => {
-                    if let Some((key, _)) = graph.get_node_by_url(url.as_str()) {
+                ArchivedLogEntry::RemoveNode { node_id } => {
+                    let Ok(node_id) = Uuid::parse_str(node_id.as_str()) else {
+                        continue;
+                    };
+                    if let Some(key) = graph.get_node_key_by_id(node_id) {
                         graph.remove_node(key);
                     }
                 },
                 ArchivedLogEntry::ClearGraph => {
                     *graph = Graph::new();
                 },
-                ArchivedLogEntry::UpdateNodeUrl { old_url, new_url } => {
-                    if let Some((key, _)) = graph.get_node_by_url(old_url.as_str()) {
+                ArchivedLogEntry::UpdateNodeUrl { node_id, new_url } => {
+                    let Ok(node_id) = Uuid::parse_str(node_id.as_str()) else {
+                        continue;
+                    };
+                    if let Some(key) = graph.get_node_key_by_id(node_id) {
                         graph.update_node_url(key, new_url.to_string());
                     }
                 },
@@ -333,8 +359,7 @@ impl GraphStore {
         for guard in keyspace.iter() {
             if let Ok(key_bytes) = guard.key() {
                 if key_bytes.len() == 8 {
-                    let seq =
-                        u64::from_be_bytes(key_bytes.as_ref().try_into().unwrap_or([0u8; 8]));
+                    let seq = u64::from_be_bytes(key_bytes.as_ref().try_into().unwrap_or([0u8; 8]));
                     max = max.max(seq);
                 }
             }
@@ -375,6 +400,7 @@ mod tests {
     use crate::graph::EdgeType;
     use euclid::default::Point2D;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     fn create_test_store() -> (GraphStore, TempDir) {
         let dir = TempDir::new().unwrap();
@@ -393,22 +419,26 @@ mod tests {
     fn test_log_and_recover() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
 
         {
             let mut store = GraphStore::open(path.clone()).unwrap();
             store.log_mutation(&LogEntry::AddNode {
+                node_id: id_a.to_string(),
                 url: "https://a.com".to_string(),
                 position_x: 10.0,
                 position_y: 20.0,
             });
             store.log_mutation(&LogEntry::AddNode {
+                node_id: id_b.to_string(),
                 url: "https://b.com".to_string(),
                 position_x: 30.0,
                 position_y: 40.0,
             });
             store.log_mutation(&LogEntry::AddEdge {
-                from_url: "https://a.com".to_string(),
-                to_url: "https://b.com".to_string(),
+                from_node_id: id_a.to_string(),
+                to_node_id: id_b.to_string(),
                 edge_type: types::PersistedEdgeType::Hyperlink,
             });
         }
@@ -461,7 +491,9 @@ mod tests {
             graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
             store.take_snapshot(&graph);
 
+            let id_b = Uuid::new_v4();
             store.log_mutation(&LogEntry::AddNode {
+                node_id: id_b.to_string(),
                 url: "https://b.com".to_string(),
                 position_x: 50.0,
                 position_y: 50.0,
@@ -478,35 +510,41 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_url_idempotent() {
+    fn test_duplicate_url_supported_with_distinct_ids() {
         let (mut store, _dir) = create_test_store();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
 
         store.log_mutation(&LogEntry::AddNode {
+            node_id: id_a.to_string(),
             url: "https://a.com".to_string(),
             position_x: 0.0,
             position_y: 0.0,
         });
         store.log_mutation(&LogEntry::AddNode {
+            node_id: id_b.to_string(),
             url: "https://a.com".to_string(),
             position_x: 100.0,
             position_y: 100.0,
         });
 
         let graph = store.recover().unwrap();
-        assert_eq!(graph.node_count(), 1);
+        assert_eq!(graph.node_count(), 2);
     }
 
     #[test]
     fn test_log_title_update() {
         let (mut store, _dir) = create_test_store();
+        let id = Uuid::new_v4();
 
         store.log_mutation(&LogEntry::AddNode {
+            node_id: id.to_string(),
             url: "https://a.com".to_string(),
             position_x: 0.0,
             position_y: 0.0,
         });
         store.log_mutation(&LogEntry::UpdateNodeTitle {
-            url: "https://a.com".to_string(),
+            node_id: id.to_string(),
             title: "My Site".to_string(),
         });
 
@@ -518,19 +556,23 @@ mod tests {
     #[test]
     fn test_log_remove_node_recover() {
         let (mut store, _dir) = create_test_store();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
 
         store.log_mutation(&LogEntry::AddNode {
+            node_id: id_a.to_string(),
             url: "https://a.com".to_string(),
             position_x: 0.0,
             position_y: 0.0,
         });
         store.log_mutation(&LogEntry::AddNode {
+            node_id: id_b.to_string(),
             url: "https://b.com".to_string(),
             position_x: 100.0,
             position_y: 100.0,
         });
         store.log_mutation(&LogEntry::RemoveNode {
-            url: "https://a.com".to_string(),
+            node_id: id_a.to_string(),
         });
 
         let graph = store.recover().unwrap();
@@ -544,11 +586,13 @@ mod tests {
         let (mut store, _dir) = create_test_store();
 
         store.log_mutation(&LogEntry::AddNode {
+            node_id: Uuid::new_v4().to_string(),
             url: "https://a.com".to_string(),
             position_x: 0.0,
             position_y: 0.0,
         });
         store.log_mutation(&LogEntry::AddNode {
+            node_id: Uuid::new_v4().to_string(),
             url: "https://b.com".to_string(),
             position_x: 100.0,
             position_y: 100.0,
@@ -564,12 +608,14 @@ mod tests {
         let (mut store, _dir) = create_test_store();
 
         store.log_mutation(&LogEntry::AddNode {
+            node_id: Uuid::new_v4().to_string(),
             url: "https://old.com".to_string(),
             position_x: 0.0,
             position_y: 0.0,
         });
         store.log_mutation(&LogEntry::ClearGraph);
         store.log_mutation(&LogEntry::AddNode {
+            node_id: Uuid::new_v4().to_string(),
             url: "https://new.com".to_string(),
             position_x: 50.0,
             position_y: 50.0,
@@ -584,14 +630,16 @@ mod tests {
     #[test]
     fn test_log_update_node_url_recover() {
         let (mut store, _dir) = create_test_store();
+        let id = Uuid::new_v4();
 
         store.log_mutation(&LogEntry::AddNode {
+            node_id: id.to_string(),
             url: "https://old.com".to_string(),
             position_x: 10.0,
             position_y: 20.0,
         });
         store.log_mutation(&LogEntry::UpdateNodeUrl {
-            old_url: "https://old.com".to_string(),
+            node_id: id.to_string(),
             new_url: "https://new.com".to_string(),
         });
 
@@ -604,16 +652,48 @@ mod tests {
     }
 
     #[test]
+    fn test_uuid_log_replay_resolves_by_id_not_url() {
+        let (mut store, _dir) = create_test_store();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+
+        store.log_mutation(&LogEntry::AddNode {
+            node_id: id_a.to_string(),
+            url: "https://same.com".to_string(),
+            position_x: 0.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::AddNode {
+            node_id: id_b.to_string(),
+            url: "https://same.com".to_string(),
+            position_x: 100.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::UpdateNodeUrl {
+            node_id: id_a.to_string(),
+            new_url: "https://updated-a.com".to_string(),
+        });
+
+        let graph = store.recover().unwrap();
+        let (_, node_a) = graph.get_node_by_id(id_a).unwrap();
+        let (_, node_b) = graph.get_node_by_id(id_b).unwrap();
+        assert_eq!(node_a.url, "https://updated-a.com");
+        assert_eq!(node_b.url, "https://same.com");
+    }
+
+    #[test]
     fn test_remove_nonexistent_node_noop() {
         let (mut store, _dir) = create_test_store();
 
+        let id = Uuid::new_v4();
         store.log_mutation(&LogEntry::AddNode {
+            node_id: id.to_string(),
             url: "https://a.com".to_string(),
             position_x: 0.0,
             position_y: 0.0,
         });
         store.log_mutation(&LogEntry::RemoveNode {
-            url: "https://nonexistent.com".to_string(),
+            node_id: Uuid::new_v4().to_string(),
         });
 
         let graph = store.recover().unwrap();
@@ -631,6 +711,7 @@ mod tests {
             graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
             store.take_snapshot(&graph);
             store.log_mutation(&LogEntry::AddNode {
+                node_id: Uuid::new_v4().to_string(),
                 url: "https://b.com".to_string(),
                 position_x: 10.0,
                 position_y: 20.0,
@@ -656,7 +737,9 @@ mod tests {
     #[test]
     fn test_clear_all_removes_tile_layout() {
         let (mut store, _dir) = create_test_store();
-        store.save_tile_layout_json(r#"{"root":null,"tiles":{}}"#).unwrap();
+        store
+            .save_tile_layout_json(r#"{"root":null,"tiles":{}}"#)
+            .unwrap();
         assert!(store.load_tile_layout_json().is_some());
         store.clear_all().unwrap();
         assert!(store.load_tile_layout_json().is_none());
@@ -673,6 +756,112 @@ mod tests {
     fn test_set_snapshot_interval_secs_rejects_zero() {
         let (mut store, _dir) = create_test_store();
         assert!(store.set_snapshot_interval_secs(0).is_err());
-        assert_eq!(store.snapshot_interval_secs(), DEFAULT_SNAPSHOT_INTERVAL_SECS);
+        assert_eq!(
+            store.snapshot_interval_secs(),
+            DEFAULT_SNAPSHOT_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn test_recover_ignores_corrupt_log_entries() {
+        let (mut store, _dir) = create_test_store();
+        let valid_id = Uuid::new_v4();
+        store.log_mutation(&LogEntry::AddNode {
+            node_id: valid_id.to_string(),
+            url: "https://valid.com".to_string(),
+            position_x: 1.0,
+            position_y: 2.0,
+        });
+        // Append an invalid rkyv payload directly to the log.
+        let corrupt_key = 99u64.to_be_bytes();
+        store.log_keyspace.insert(corrupt_key, b"not-rkyv").unwrap();
+
+        let graph = store.recover().unwrap();
+        assert_eq!(graph.node_count(), 1);
+        assert!(graph.get_node_by_id(valid_id).is_some());
+    }
+
+    #[test]
+    fn test_recover_skips_invalid_uuid_log_entries() {
+        let (mut store, _dir) = create_test_store();
+        store.log_mutation(&LogEntry::AddNode {
+            node_id: "not-a-uuid".to_string(),
+            url: "https://bad.com".to_string(),
+            position_x: 0.0,
+            position_y: 0.0,
+        });
+        store.log_mutation(&LogEntry::AddNode {
+            node_id: Uuid::new_v4().to_string(),
+            url: "https://good.com".to_string(),
+            position_x: 3.0,
+            position_y: 4.0,
+        });
+
+        let graph = store.recover().unwrap();
+        assert_eq!(graph.node_count(), 1);
+        assert!(graph.get_node_by_url("https://good.com").is_some());
+        assert!(graph.get_node_by_url("https://bad.com").is_none());
+    }
+
+    #[test]
+    fn test_recover_with_corrupt_snapshot_replays_log_only() {
+        let (mut store, _dir) = create_test_store();
+        // Write an invalid snapshot payload.
+        {
+            let write_txn = store.snapshot_db.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(SNAPSHOT_TABLE).unwrap();
+                table.insert("latest", &b"corrupt-snapshot"[..]).unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+        // Valid log entry should still recover.
+        store.log_mutation(&LogEntry::AddNode {
+            node_id: Uuid::new_v4().to_string(),
+            url: "https://from-log.com".to_string(),
+            position_x: 9.0,
+            position_y: 9.0,
+        });
+
+        let graph = store.recover().unwrap();
+        assert_eq!(graph.node_count(), 1);
+        assert!(graph.get_node_by_url("https://from-log.com").is_some());
+    }
+
+    #[test]
+    fn test_recover_with_corrupt_snapshot_and_empty_log_returns_none() {
+        let (store, _dir) = create_test_store();
+        {
+            let write_txn = store.snapshot_db.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(SNAPSHOT_TABLE).unwrap();
+                table.insert("latest", &b"corrupt-snapshot"[..]).unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+        assert!(store.recover().is_none());
+    }
+
+    #[test]
+    #[ignore]
+    fn perf_snapshot_and_recover_5k_nodes_under_budget() {
+        let (mut store, _dir) = create_test_store();
+        let mut graph = Graph::new();
+        for i in 0..5000 {
+            let _ = graph.add_node(
+                format!("https://example.com/{i}"),
+                Point2D::new(i as f32, (i % 200) as f32),
+            );
+        }
+
+        let start = std::time::Instant::now();
+        store.take_snapshot(&graph);
+        let recovered = store.recover();
+        let elapsed = start.elapsed();
+        assert!(recovered.is_some());
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "snapshot+recover exceeded budget: {elapsed:?}"
+        );
     }
 }

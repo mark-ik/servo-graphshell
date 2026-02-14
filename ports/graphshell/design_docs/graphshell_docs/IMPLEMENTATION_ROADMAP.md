@@ -2,8 +2,10 @@
 
 **Document Type**: Feature-driven implementation plan
 **Organization**: By feature targets with validation tests (not calendar time)
-**Last Updated**: February 12, 2026
+**Last Updated**: February 14, 2026
 **Priority Focus**: Post-egui_tiles stabilization and FT2 completion
+
+**Policy Note (2026-02-14)**: Graphshell has no production users and no legacy dataset obligations. Do not add backward-compat contingency branches unless explicitly requested.
 
 ---
 
@@ -23,8 +25,7 @@
 
 **Current Gaps**:
 
-- [ ] Physics architecture migration: replace custom physics/worker path with egui_graphs force-directed integration
-- [ ] Selection state consolidation: remove duplicated app/node selection state
+- [ ] Selection-state hardening follow-up: keep reducer-driven behavior and explicit selection metadata stable
 - [ ] FT2 completion: thumbnail pipeline (favicon vertical slice already implemented)
 
 **Status**: Core browsing, tiled webviews, and persistence are production-functional. Next execution block is physics/selection simplification, then FT2 thumbnail completion.
@@ -431,25 +432,22 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 **Validation Gates**:
 
-- After M1: User testing with real browsing workflows
-- After M2: Performance benchmarks vs traditional browsers (memory, speed)
-- After M3: Community feedback, public release decision
+- After M1: deterministic integration tests for graph/webview semantics and persistence recovery
+- After M2: performance benchmarks for node count, memory, and frame-time budgets
+- After M3: release-readiness audit against architecture and test criteria
 
 ---
 
 ## Risk Mitigation
 
-**Risk**: Servo integration harder than expected (API unstable, threading issues)  
-**Mitigation**: Start with single webview, expand gradually; fallback to embedded browser (WebView2/WebKitGTK) if Servo proves too difficult
+**Risk**: Servo/Graphshell semantic divergence  
+**Mitigation**: keep event-driven semantics (`notify_*`, `request_create_new`) as single source, with reducer-boundary tests
 
 **Risk**: Performance targets not met (500 nodes too slow)  
-**Mitigation**: Implement LOD (level-of-detail clustering), fallback to timeline strip + graph as optional view
-
-**Risk**: User adoption low (spatial UX confusing)  
-**Mitigation**: Extensive user testing after M1, willingness to pivot UI based on feedback
+**Mitigation**: profile + optimize current architecture first (layout, draw, capture cadence) before introducing alternate UI modes
 
 **Risk**: Persistence bugs cause data loss  
-**Mitigation**: Comprehensive crash recovery tests, backup strategy (snapshots stored in multiple locations)
+**Mitigation**: comprehensive crash-recovery tests and strict UUID-keyed replay invariants
 
 ---
 

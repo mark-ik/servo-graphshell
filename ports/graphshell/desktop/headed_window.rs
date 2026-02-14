@@ -33,7 +33,9 @@ use winit::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
-use winit::keyboard::{Key as LogicalKey, KeyCode, ModifiersState, NamedKey as WinitNamedKey, PhysicalKey};
+use winit::keyboard::{
+    Key as LogicalKey, KeyCode, ModifiersState, NamedKey as WinitNamedKey, PhysicalKey,
+};
 #[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowAttributesExtWayland;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -298,10 +300,7 @@ impl HeadedWindow {
     }
 
     /// Helper function to handle mouse move events.
-    fn set_webview_relative_mouse_point(
-        &self,
-        point: Point2D<f32, DeviceIndependentPixel>,
-    ) {
+    fn set_webview_relative_mouse_point(&self, point: Point2D<f32, DeviceIndependentPixel>) {
         let scale = self.hidpi_scale_factor().get();
         self.webview_relative_mouse_point
             .set(Point2D::new(point.x * scale, point.y * scale));
@@ -312,7 +311,6 @@ impl HeadedWindow {
         webview: &WebView,
         point: Point2D<f32, DevicePixel>,
     ) {
-
         let previous_point = self.webview_relative_mouse_point.get();
         self.webview_relative_mouse_point.set(point);
 
@@ -642,16 +640,18 @@ impl HeadedWindow {
                 self.gui.borrow().surrender_focus();
             },
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(key_code),
-                    state: ElementState::Pressed,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(key_code),
+                        state: ElementState::Pressed,
+                        ..
+                    },
                 ..
             } if matches!(
                 key_code,
                 KeyCode::KeyT | KeyCode::KeyP | KeyCode::KeyC | KeyCode::Home | KeyCode::Escape
-            ) => {
+            ) =>
+            {
                 // Graph control shortcuts always go to GUI, even when webview has focus
                 let response = self
                     .gui
@@ -723,8 +723,8 @@ impl HeadedWindow {
                     }
                 },
                 WindowEvent::CursorMoved { position, .. } => {
-                    let point =
-                        winit_position_to_euclid_point(position).to_f32() / self.hidpi_scale_factor();
+                    let point = winit_position_to_euclid_point(position).to_f32()
+                        / self.hidpi_scale_factor();
                     self.last_mouse_position.set(Some(point));
                     let pointer_target = self.gui.borrow().webview_at_point(point);
                     if let Some((webview_id, local_point)) = pointer_target
@@ -974,8 +974,8 @@ impl PlatformWindow for HeadedWindow {
         let new_outer_size =
             new_outer_size.clamp(MIN_WINDOW_INNER_SIZE + decoration_size, screen_size * 2);
 
-        if outer_size.width == new_outer_size.width as u32 &&
-            outer_size.height == new_outer_size.height as u32
+        if outer_size.width == new_outer_size.width as u32
+            && outer_size.height == new_outer_size.height as u32
         {
             return Some(new_outer_size);
         }

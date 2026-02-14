@@ -12,7 +12,6 @@ mod app;
 mod graph;
 mod input;
 mod persistence;
-mod physics;
 mod render;
 mod util;
 

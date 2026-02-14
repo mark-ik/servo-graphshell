@@ -37,7 +37,7 @@ Current graph identity is URL-index-driven (`url_to_node: HashMap<String, NodeKe
 3. Change URL index to support duplicates (`HashMap<String, Vec<NodeKey>>` or equivalent).
 4. Add UUID lookup index (`HashMap<Uuid, NodeKey>`).
 5. Extend snapshot/log persistence to include UUID-based identity.
-6. Add migration for restored snapshots that lack UUID.
+6. Do not add legacy snapshot migration paths; Graphshell is pre-user and UUID-only.
 
 **Tests**
 

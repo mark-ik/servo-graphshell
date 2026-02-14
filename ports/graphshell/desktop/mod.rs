@@ -14,12 +14,12 @@ pub(crate) mod gamepad;
 pub mod geometry;
 mod gui;
 pub(crate) mod headed_window;
-mod webview_controller;
 mod headless_window;
 mod keyutils;
 mod protocols;
-mod tracing;
-mod tile_kind;
 mod tile_behavior;
+mod tile_kind;
+mod tracing;
+mod webview_controller;
 #[cfg(feature = "webxr")]
 mod webxr;

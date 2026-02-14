@@ -82,6 +82,7 @@ tracing = { workspace = true, optional = true }
 tracing-perfetto = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["env-filter"] }
 url = { workspace = true }
+uuid = { workspace = true, features = ["serde", "v4"] }
 rand = "0.8"
 webdriver_server = { path = "../../components/webdriver_server" }
 
@@ -123,7 +124,6 @@ egui_glow = { version = "0.33.3", features = ["winit"] }
 egui_graphs = { version = "0.29.0", features = ["events"] }
 egui_tiles = { version = "0.14.1", features = ["serde"] }
 petgraph = { version = "0.8.3", features = ["serde-1"] }
-kiddo = "4.2"
 fjall = "3"
 redb = "3"
 rkyv = { version = "0.8", features = ["std"] }

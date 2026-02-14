@@ -1,7 +1,7 @@
 # Graphshell Design Documentation Index
 
-**Last Updated**: February 12, 2026
-**Status**: Core browsing graph functional with egui_tiles runtime complete; physics/selection simplification is next
+**Last Updated**: February 14, 2026
+**Status**: Core browsing graph functional; active path is reducer-driven semantics with UUID identity and no-legacy policy
 
 ---
 
@@ -36,6 +36,10 @@
    - egui_tiles migration complete
    - Next block: physics/selection simplification, then FT2 thumbnails
    - Validation tests and success criteria for each target
+
+6. **[2026-02-14_no_legacy_development_policy.md](2026-02-14_no_legacy_development_policy.md)** (5 min)
+   - Explicit project policy: no users, no legacy compatibility obligations
+   - Prefer deletion over compatibility shims
 
 ### Phase 1: Detailed Specs
 
@@ -86,6 +90,7 @@
 | Document | Purpose | Read When |
 | -------- | ------- | --------- |
 | **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** | Feature targets, validation criteria, tech stack | Before implementing features |
+| **[2026-02-14_no_legacy_development_policy.md](2026-02-14_no_legacy_development_policy.md)** | Explicit no-legacy development defaults | Before architecture changes |
 | **[implementation_strategy/2026-02-11_phase1_refinement_plan.md](implementation_strategy/2026-02-11_phase1_refinement_plan.md)** | **Active:** Phase 1 refinement (11 steps) | Current work reference |
 | **[implementation_strategy/2026-02-12_persistence_ux_plan.md](implementation_strategy/2026-02-12_persistence_ux_plan.md)** | Persistence reset UX plan | Reference (completed) |
 | **[implementation_strategy/2026-02-12_physics_selection_plan.md](implementation_strategy/2026-02-12_physics_selection_plan.md)** | Physics migration + selection consolidation plan | Current work reference |

@@ -14,13 +14,11 @@ use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableGraph};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use petgraph::{Directed, Direction};
 use std::collections::HashMap;
+use uuid::Uuid;
 
-use crate::persistence::types::{
-    GraphSnapshot, PersistedEdge, PersistedEdgeType, PersistedNode,
-};
+use crate::persistence::types::{GraphSnapshot, PersistedEdge, PersistedEdgeType, PersistedNode};
 
 pub mod egui_adapter;
-pub mod spatial;
 
 /// Stable node handle (petgraph NodeIndex — survives other deletions)
 pub type NodeKey = NodeIndex;
@@ -31,6 +29,9 @@ pub type EdgeKey = EdgeIndex;
 /// A webpage node in the graph
 #[derive(Debug, Clone)]
 pub struct Node {
+    /// Stable node identity.
+    pub id: Uuid,
+
     /// Full URL of the webpage
     pub url: String,
 
@@ -43,14 +44,26 @@ pub struct Node {
     /// Velocity for physics simulation
     pub velocity: Vector2D<f32>,
 
-    /// Whether this node is currently selected
-    pub is_selected: bool,
-
     /// Whether this node's position is pinned (doesn't move with physics)
     pub is_pinned: bool,
 
     /// Timestamp of last visit
     pub last_visited: std::time::SystemTime,
+
+    /// Navigation history seen for this node's mapped webview.
+    pub history_entries: Vec<String>,
+
+    /// Current index in `history_entries`.
+    pub history_index: usize,
+
+    /// Optional thumbnail bytes (PNG), persisted in snapshots.
+    pub thumbnail_png: Option<Vec<u8>>,
+
+    /// Thumbnail width in pixels (valid when `thumbnail_png` is `Some`).
+    pub thumbnail_width: u32,
+
+    /// Thumbnail height in pixels (valid when `thumbnail_png` is `Some`).
+    pub thumbnail_height: u32,
 
     /// Optional favicon pixel data (RGBA8), persisted in snapshots.
     pub favicon_rgba: Option<Vec<u8>>,
@@ -99,8 +112,11 @@ pub struct Graph {
     /// The underlying petgraph stable graph
     pub(crate) inner: StableGraph<Node, EdgeType, Directed>,
 
-    /// URL to NodeKey mapping for quick lookup
-    url_to_node: HashMap<String, NodeKey>,
+    /// URL to node mapping for lookup (supports duplicate URLs).
+    url_to_nodes: HashMap<String, Vec<NodeKey>>,
+
+    /// Stable UUID to node mapping.
+    id_to_node: HashMap<Uuid, NodeKey>,
 }
 
 impl Graph {
@@ -108,35 +124,48 @@ impl Graph {
     pub fn new() -> Self {
         Self {
             inner: StableGraph::new(),
-            url_to_node: HashMap::new(),
+            url_to_nodes: HashMap::new(),
+            id_to_node: HashMap::new(),
         }
     }
 
     /// Add a new node to the graph
     pub fn add_node(&mut self, url: String, position: Point2D<f32>) -> NodeKey {
+        self.add_node_with_id(Uuid::new_v4(), url, position)
+    }
+
+    /// Add a node with a pre-existing UUID.
+    pub fn add_node_with_id(&mut self, id: Uuid, url: String, position: Point2D<f32>) -> NodeKey {
         let now = std::time::SystemTime::now();
         let key = self.inner.add_node(Node {
+            id,
             title: url.clone(),
             url: url.clone(),
             position,
             velocity: Vector2D::zero(),
-            is_selected: false,
             is_pinned: false,
             last_visited: now,
+            history_entries: Vec::new(),
+            history_index: 0,
+            thumbnail_png: None,
+            thumbnail_width: 0,
+            thumbnail_height: 0,
             favicon_rgba: None,
             favicon_width: 0,
             favicon_height: 0,
             lifecycle: NodeLifecycle::Cold,
         });
 
-        self.url_to_node.insert(url, key);
+        self.url_to_nodes.entry(url).or_default().push(key);
+        self.id_to_node.insert(id, key);
         key
     }
 
     /// Remove a node and all its connected edges
     pub fn remove_node(&mut self, key: NodeKey) -> bool {
         if let Some(node) = self.inner.remove_node(key) {
-            self.url_to_node.remove(&node.url);
+            self.id_to_node.remove(&node.id);
+            self.remove_url_mapping(&node.url, key);
             true
         } else {
             false
@@ -148,18 +177,13 @@ impl Graph {
     pub fn update_node_url(&mut self, key: NodeKey, new_url: String) -> Option<String> {
         let node = self.inner.node_weight_mut(key)?;
         let old_url = std::mem::replace(&mut node.url, new_url.clone());
-        self.url_to_node.remove(&old_url);
-        self.url_to_node.insert(new_url, key);
+        self.remove_url_mapping(&old_url, key);
+        self.url_to_nodes.entry(new_url).or_default().push(key);
         Some(old_url)
     }
 
     /// Add an edge between two nodes
-    pub fn add_edge(
-        &mut self,
-        from: NodeKey,
-        to: NodeKey,
-        edge_type: EdgeType,
-    ) -> Option<EdgeKey> {
+    pub fn add_edge(&mut self, from: NodeKey, to: NodeKey, edge_type: EdgeType) -> Option<EdgeKey> {
         if !self.inner.contains_node(from) || !self.inner.contains_node(to) {
             return None;
         }
@@ -178,8 +202,24 @@ impl Graph {
 
     /// Get a node and its key by URL
     pub fn get_node_by_url(&self, url: &str) -> Option<(NodeKey, &Node)> {
-        let &key = self.url_to_node.get(url)?;
+        let key = self.url_to_nodes.get(url)?.last().copied()?;
         Some((key, self.inner.node_weight(key)?))
+    }
+
+    /// Get all node keys currently mapped to a URL.
+    pub fn get_nodes_by_url(&self, url: &str) -> Vec<NodeKey> {
+        self.url_to_nodes.get(url).cloned().unwrap_or_default()
+    }
+
+    /// Get a node by UUID.
+    pub fn get_node_by_id(&self, id: Uuid) -> Option<(NodeKey, &Node)> {
+        let key = *self.id_to_node.get(&id)?;
+        Some((key, self.inner.node_weight(key)?))
+    }
+
+    /// Get node key by UUID.
+    pub fn get_node_key_by_id(&self, id: Uuid) -> Option<NodeKey> {
+        self.id_to_node.get(&id).copied()
     }
 
     /// Iterate over all nodes as (key, node) pairs
@@ -228,11 +268,17 @@ impl Graph {
         let nodes = self
             .nodes()
             .map(|(_, node)| PersistedNode {
+                node_id: node.id.to_string(),
                 url: node.url.clone(),
                 title: node.title.clone(),
                 position_x: node.position.x,
                 position_y: node.position.y,
                 is_pinned: node.is_pinned,
+                history_entries: node.history_entries.clone(),
+                history_index: node.history_index,
+                thumbnail_png: node.thumbnail_png.clone(),
+                thumbnail_width: node.thumbnail_width,
+                thumbnail_height: node.thumbnail_height,
                 favicon_rgba: node.favicon_rgba.clone(),
                 favicon_width: node.favicon_width,
                 favicon_height: node.favicon_height,
@@ -242,17 +288,17 @@ impl Graph {
         let edges = self
             .edges()
             .map(|edge| {
-                let from_url = self
+                let from_node_id = self
                     .get_node(edge.from)
-                    .map(|n| n.url.clone())
+                    .map(|n| n.id.to_string())
                     .unwrap_or_default();
-                let to_url = self
+                let to_node_id = self
                     .get_node(edge.to)
-                    .map(|n| n.url.clone())
+                    .map(|n| n.id.to_string())
                     .unwrap_or_default();
                 PersistedEdge {
-                    from_url,
-                    to_url,
+                    from_node_id,
+                    to_node_id,
                     edge_type: match edge.edge_type {
                         EdgeType::Hyperlink => PersistedEdgeType::Hyperlink,
                         EdgeType::History => PersistedEdgeType::History,
@@ -278,11 +324,24 @@ impl Graph {
         let mut graph = Graph::new();
 
         for pnode in &snapshot.nodes {
-            let key =
-                graph.add_node(pnode.url.clone(), Point2D::new(pnode.position_x, pnode.position_y));
+            let Ok(node_id) = Uuid::parse_str(&pnode.node_id) else {
+                continue;
+            };
+            let key = graph.add_node_with_id(
+                node_id,
+                pnode.url.clone(),
+                Point2D::new(pnode.position_x, pnode.position_y),
+            );
             if let Some(node) = graph.get_node_mut(key) {
                 node.title = pnode.title.clone();
                 node.is_pinned = pnode.is_pinned;
+                node.history_entries = pnode.history_entries.clone();
+                node.history_index = pnode
+                    .history_index
+                    .min(node.history_entries.len().saturating_sub(1));
+                node.thumbnail_png = pnode.thumbnail_png.clone();
+                node.thumbnail_width = pnode.thumbnail_width;
+                node.thumbnail_height = pnode.thumbnail_height;
                 node.favicon_rgba = pnode.favicon_rgba.clone();
                 node.favicon_width = pnode.favicon_width;
                 node.favicon_height = pnode.favicon_height;
@@ -290,8 +349,12 @@ impl Graph {
         }
 
         for pedge in &snapshot.edges {
-            let from_key = graph.url_to_node.get(&pedge.from_url).copied();
-            let to_key = graph.url_to_node.get(&pedge.to_url).copied();
+            let from_key = Uuid::parse_str(&pedge.from_node_id)
+                .ok()
+                .and_then(|id| graph.get_node_key_by_id(id));
+            let to_key = Uuid::parse_str(&pedge.to_node_id)
+                .ok()
+                .and_then(|id| graph.get_node_key_by_id(id));
             if let (Some(from), Some(to)) = (from_key, to_key) {
                 let edge_type = match pedge.edge_type {
                     PersistedEdgeType::Hyperlink => EdgeType::Hyperlink,
@@ -302,6 +365,15 @@ impl Graph {
         }
 
         graph
+    }
+
+    fn remove_url_mapping(&mut self, url: &str, key: NodeKey) {
+        if let Some(keys) = self.url_to_nodes.get_mut(url) {
+            keys.retain(|candidate| *candidate != key);
+            if keys.is_empty() {
+                self.url_to_nodes.remove(url);
+            }
+        }
     }
 }
 
@@ -335,7 +407,6 @@ mod tests {
         assert_eq!(node.position.y, 200.0);
         assert_eq!(node.velocity.x, 0.0);
         assert_eq!(node.velocity.y, 0.0);
-        assert!(!node.is_selected);
         assert!(!node.is_pinned);
         assert_eq!(node.lifecycle, NodeLifecycle::Cold);
     }
@@ -351,6 +422,19 @@ mod tests {
         assert!(graph.get_node(key1).is_some());
         assert!(graph.get_node(key2).is_some());
         assert!(graph.get_node(key3).is_some());
+    }
+
+    #[test]
+    fn test_duplicate_url_nodes_have_distinct_ids() {
+        let mut graph = Graph::new();
+        let key1 = graph.add_node("https://same.com".to_string(), Point2D::new(0.0, 0.0));
+        let key2 = graph.add_node("https://same.com".to_string(), Point2D::new(10.0, 10.0));
+
+        assert_ne!(key1, key2);
+        let node1 = graph.get_node(key1).unwrap();
+        let node2 = graph.get_node(key2).unwrap();
+        assert_ne!(node1.id, node2.id);
+        assert_eq!(graph.get_nodes_by_url("https://same.com").len(), 2);
     }
 
     #[test]
@@ -372,14 +456,12 @@ mod tests {
         {
             let node = graph.get_node_mut(key).unwrap();
             node.position = Point2D::new(100.0, 200.0);
-            node.is_selected = true;
             node.is_pinned = true;
         }
 
         let node = graph.get_node(key).unwrap();
         assert_eq!(node.position.x, 100.0);
         assert_eq!(node.position.y, 200.0);
-        assert!(node.is_selected);
         assert!(node.is_pinned);
     }
 
@@ -405,8 +487,16 @@ mod tests {
 
         let invalid_key = NodeIndex::new(999);
 
-        assert!(graph.add_edge(invalid_key, node1, EdgeType::Hyperlink).is_none());
-        assert!(graph.add_edge(node1, invalid_key, EdgeType::Hyperlink).is_none());
+        assert!(
+            graph
+                .add_edge(invalid_key, node1, EdgeType::Hyperlink)
+                .is_none()
+        );
+        assert!(
+            graph
+                .add_edge(node1, invalid_key, EdgeType::Hyperlink)
+                .is_none()
+        );
     }
 
     #[test]
@@ -609,32 +699,67 @@ mod tests {
         assert_eq!(restored_node.favicon_height, 1);
     }
 
+    #[test]
+    fn test_snapshot_preserves_thumbnail_data() {
+        let mut graph = Graph::new();
+        let key = graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
+        let thumbnail = vec![137, 80, 78, 71];
+        if let Some(node) = graph.get_node_mut(key) {
+            node.thumbnail_png = Some(thumbnail.clone());
+            node.thumbnail_width = 64;
+            node.thumbnail_height = 48;
+        }
+
+        let snapshot = graph.to_snapshot();
+        let restored = Graph::from_snapshot(&snapshot);
+        let (_, restored_node) = restored.get_node_by_url("https://a.com").unwrap();
+        assert_eq!(restored_node.thumbnail_png.as_ref(), Some(&thumbnail));
+        assert_eq!(restored_node.thumbnail_width, 64);
+        assert_eq!(restored_node.thumbnail_height, 48);
+    }
+
+    #[test]
+    fn test_snapshot_preserves_uuid_identity() {
+        let mut graph = Graph::new();
+        let key = graph.add_node("https://a.com".to_string(), Point2D::new(0.0, 0.0));
+        let node_id = graph.get_node(key).unwrap().id;
+
+        let snapshot = graph.to_snapshot();
+        let restored = Graph::from_snapshot(&snapshot);
+        let (_, restored_node) = restored.get_node_by_id(node_id).unwrap();
+        assert_eq!(restored_node.url, "https://a.com");
+    }
+
     // --- TEST-3: from_snapshot edge cases ---
 
     #[test]
     fn test_snapshot_edge_with_missing_url_is_dropped() {
-        use crate::persistence::types::{GraphSnapshot, PersistedNode, PersistedEdge, PersistedEdgeType};
+        use crate::persistence::types::{
+            GraphSnapshot, PersistedEdge, PersistedEdgeType, PersistedNode,
+        };
 
         let snapshot = GraphSnapshot {
-            nodes: vec![
-                PersistedNode {
-                    url: "https://a.com".to_string(),
-                    title: String::new(),
-                    position_x: 0.0,
-                    position_y: 0.0,
-                    is_pinned: false,
-                    favicon_rgba: None,
-                    favicon_width: 0,
-                    favicon_height: 0,
-                },
-            ],
-            edges: vec![
-                PersistedEdge {
-                    from_url: "https://a.com".to_string(),
-                    to_url: "https://nonexistent.com".to_string(),
-                    edge_type: PersistedEdgeType::Hyperlink,
-                },
-            ],
+            nodes: vec![PersistedNode {
+                node_id: Uuid::new_v4().to_string(),
+                url: "https://a.com".to_string(),
+                title: String::new(),
+                position_x: 0.0,
+                position_y: 0.0,
+                is_pinned: false,
+                history_entries: vec![],
+                history_index: 0,
+                thumbnail_png: None,
+                thumbnail_width: 0,
+                thumbnail_height: 0,
+                favicon_rgba: None,
+                favicon_width: 0,
+                favicon_height: 0,
+            }],
+            edges: vec![PersistedEdge {
+                from_node_id: Uuid::new_v4().to_string(),
+                to_node_id: Uuid::new_v4().to_string(),
+                edge_type: PersistedEdgeType::Hyperlink,
+            }],
             timestamp_secs: 0,
         };
 
@@ -652,21 +777,33 @@ mod tests {
         let snapshot = GraphSnapshot {
             nodes: vec![
                 PersistedNode {
+                    node_id: Uuid::new_v4().to_string(),
                     url: "https://same.com".to_string(),
                     title: "First".to_string(),
                     position_x: 0.0,
                     position_y: 0.0,
                     is_pinned: false,
+                    history_entries: vec![],
+                    history_index: 0,
+                    thumbnail_png: None,
+                    thumbnail_width: 0,
+                    thumbnail_height: 0,
                     favicon_rgba: None,
                     favicon_width: 0,
                     favicon_height: 0,
                 },
                 PersistedNode {
+                    node_id: Uuid::new_v4().to_string(),
                     url: "https://same.com".to_string(),
                     title: "Second".to_string(),
                     position_x: 100.0,
                     position_y: 100.0,
                     is_pinned: false,
+                    history_entries: vec![],
+                    history_index: 0,
+                    thumbnail_png: None,
+                    thumbnail_width: 0,
+                    thumbnail_height: 0,
                     favicon_rgba: None,
                     favicon_width: 0,
                     favicon_height: 0,
@@ -678,8 +815,7 @@ mod tests {
 
         let graph = Graph::from_snapshot(&snapshot);
 
-        // Both nodes are created (StableGraph allows this), but url_to_node
-        // points to the second one (last insert wins)
+        // Both nodes are created and lookup keeps last inserted semantics.
         assert_eq!(graph.node_count(), 2);
         let (_, node) = graph.get_node_by_url("https://same.com").unwrap();
         assert_eq!(node.title, "Second");

@@ -24,14 +24,18 @@ mod tests {
 
     #[test]
     fn test_long_string_truncated() {
-        let result = truncate_with_ellipsis("this is a very long title that should be truncated", 20);
+        let result =
+            truncate_with_ellipsis("this is a very long title that should be truncated", 20);
         assert_eq!(result.chars().count(), 20);
         assert!(result.ends_with('\u{2026}'));
     }
 
     #[test]
     fn test_exact_length_unchanged() {
-        assert_eq!(truncate_with_ellipsis("exactly twenty chars", 20), "exactly twenty chars");
+        assert_eq!(
+            truncate_with_ellipsis("exactly twenty chars", 20),
+            "exactly twenty chars"
+        );
     }
 
     #[test]
