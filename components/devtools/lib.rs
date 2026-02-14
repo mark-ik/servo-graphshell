@@ -148,11 +148,18 @@ struct DevtoolsInstance {
     #[conditional_malloc_size_of]
     id_map: Arc<Mutex<IdMap>>,
     browsing_contexts: FxHashMap<BrowsingContextId, String>,
+    /// This is handed to clients so they can notify the devtools instance when
+    /// their connection closes.
+    sender: Sender<DevtoolsControlMsg>,
     receiver: Receiver<DevtoolsControlMsg>,
     pipelines: FxHashMap<PipelineId, BrowsingContextId>,
     actor_workers: FxHashMap<WorkerId, String>,
     actor_requests: HashMap<String, String>,
-    connections: FxHashMap<StreamId, TcpStream>,
+    /// A map of active TCP connections to devtools clients.
+    ///
+    /// Client threads remove their connection from here once they exit.
+    #[conditional_malloc_size_of]
+    connections: Arc<Mutex<FxHashMap<StreamId, TcpStream>>>,
     next_resource_id: u64,
 }
 
@@ -191,10 +198,11 @@ impl DevtoolsInstance {
             id_map: Arc::new(Mutex::new(IdMap::default())),
             browsing_contexts: FxHashMap::default(),
             pipelines: FxHashMap::default(),
+            sender: sender.clone(),
             receiver,
             actor_requests: HashMap::new(),
             actor_workers: FxHashMap::default(),
-            connections: FxHashMap::default(),
+            connections: Default::default(),
             next_resource_id: 1,
         };
 
@@ -229,18 +237,32 @@ impl DevtoolsInstance {
                     let actors = self.registry.clone();
                     let id = next_id;
                     next_id = StreamId(id.0 + 1);
-                    self.connections.insert(id, stream.try_clone().unwrap());
 
-                    // Inform every browsing context of the new stream
-                    for name in self.browsing_contexts.values() {
-                        let browsing_context = actors.find::<BrowsingContextActor>(name);
-                        let mut streams = browsing_context.streams.borrow_mut();
-                        streams.insert(id, stream.try_clone().unwrap());
+                    let mut connections = self.connections.lock().unwrap();
+                    if connections.is_empty() {
+                        // We used to have no connection, now we have one.
+                        // Therefore, we need updates from script threads.
+                        for browsing_context in self.browsing_contexts.values() {
+                            let actor =
+                                self.registry.find::<BrowsingContextActor>(browsing_context);
+                            actor.instruct_script_to_send_live_updates(true);
+                        }
                     }
+                    connections.insert(id, stream.try_clone().unwrap());
 
+                    let connections_clone = self.connections.clone();
+                    let sender_clone = self.sender.clone();
                     thread::Builder::new()
                         .name("DevtoolsClientHandler".to_owned())
-                        .spawn(move || handle_client(actors, stream.try_clone().unwrap(), id))
+                        .spawn(move || {
+                            handle_client(
+                                actors,
+                                stream.try_clone().unwrap(),
+                                id,
+                                connections_clone,
+                                sender_clone,
+                            )
+                        })
                         .expect("Thread spawning failed");
                 },
                 DevtoolsControlMsg::FromScript(ScriptToDevtoolsControlMsg::FramerateTick(
@@ -322,11 +344,13 @@ impl DevtoolsInstance {
                     network_event,
                 )) => {
                     // copy the connections vector
+                    // FIXME: Why do we need to do this? Cloning the connections here is
+                    // almost certainly wrong and means that they might shut down without
+                    // us noticing.
                     let mut connections = Vec::<TcpStream>::new();
-                    for stream in self.connections.values() {
+                    for stream in self.connections.lock().unwrap().values() {
                         connections.push(stream.try_clone().unwrap());
                     }
-
                     self.handle_network_event(connections, request_id, network_event);
                 },
                 DevtoolsControlMsg::FromChrome(ChromeToDevtoolsControlMsg::ServerExitMsg) => break,
@@ -342,13 +366,26 @@ impl DevtoolsInstance {
                         chan.send(ProcessReports::new(reports));
                     });
                 },
+                DevtoolsControlMsg::ClientExited => {
+                    if self.connections.lock().unwrap().is_empty() {
+                        // Tell every browsing context to stop sending us updates, because we have nowhere to
+                        // send them to.
+                        for browsing_context in self.browsing_contexts.values() {
+                            let actor =
+                                self.registry.find::<BrowsingContextActor>(browsing_context);
+                            actor.instruct_script_to_send_live_updates(false);
+                        }
+                    }
+                },
             }
         }
 
         // Shut down all active connections
-        for connection in self.connections.values_mut() {
+        let mut connections = self.connections.lock().unwrap();
+        for connection in connections.values_mut() {
             let _ = connection.shutdown(Shutdown::Both);
         }
+        connections.clear();
     }
 
     fn handle_framerate_tick(&self, actor_name: String, tick: f64) {
@@ -362,20 +399,18 @@ impl DevtoolsInstance {
         let actors = &self.registry;
         let actor = actors.find::<BrowsingContextActor>(actor_name);
         let mut id_map = self.id_map.lock().expect("Mutex poisoned");
+        let mut connections = self.connections.lock().unwrap();
         if let NavigationState::Start(url) = &state {
-            let mut connections = Vec::<TcpStream>::new();
-            for stream in self.connections.values() {
-                connections.push(stream.try_clone().unwrap());
-            }
             let watcher_actor = actors.find::<WatcherActor>(&actor.watcher);
             watcher_actor.emit_will_navigate(
                 browsing_context_id,
                 url.clone(),
-                &mut connections,
+                &mut connections.values_mut(),
                 &mut id_map,
             );
         };
-        actor.navigate(state, &mut id_map);
+
+        actor.navigate(state, &mut id_map, connections.values_mut());
     }
 
     // We need separate actor representations for each script global that exists;
@@ -444,13 +479,6 @@ impl DevtoolsInstance {
                     name
                 });
 
-            // Add existing streams to the new browsing context
-            let browsing_context = actors.find::<BrowsingContextActor>(name);
-            let mut streams = browsing_context.streams.borrow_mut();
-            for (id, stream) in &self.connections {
-                streams.insert(*id, stream.try_clone().unwrap());
-            }
-
             Root::BrowsingContext(name.clone())
         };
 
@@ -486,7 +514,8 @@ impl DevtoolsInstance {
         let actors = &self.registry;
         let console_actor = actors.find::<ConsoleActor>(&console_actor_name);
         let id = worker_id.map_or(UniqueId::Pipeline(pipeline_id), UniqueId::Worker);
-        for stream in self.connections.values_mut() {
+
+        for stream in self.connections.lock().unwrap().values_mut() {
             console_actor.handle_console_resource(resource.clone(), id.clone(), actors, stream);
         }
     }
@@ -499,7 +528,8 @@ impl DevtoolsInstance {
         let actors = &self.registry;
         let console_actor = actors.find::<ConsoleActor>(&console_actor_name);
         let id = worker_id.map_or(UniqueId::Pipeline(pipeline_id), UniqueId::Worker);
-        for stream in self.connections.values_mut() {
+
+        for stream in self.connections.lock().unwrap().values_mut() {
             console_actor.send_clear_message(id.clone(), actors, stream);
         }
     }
@@ -611,7 +641,7 @@ impl DevtoolsInstance {
 
             let worker_actor = actors.find::<WorkerActor>(worker_actor_name);
 
-            for stream in self.connections.values_mut() {
+            for stream in self.connections.lock().unwrap().values_mut() {
                 worker_actor.resource_array(
                     &source_form,
                     "source".into(),
@@ -638,7 +668,7 @@ impl DevtoolsInstance {
             // Notify browsing context about the new source
             let browsing_context = actors.find::<BrowsingContextActor>(actor_name);
 
-            for stream in self.connections.values_mut() {
+            for stream in self.connections.lock().unwrap().values_mut() {
                 browsing_context.resource_array(
                     &source_form,
                     "source".into(),
@@ -695,7 +725,13 @@ fn allow_devtools_client(stream: &mut TcpStream, embedder: &EmbedderProxy, token
 }
 
 /// Process the input from a single devtools client until EOF.
-fn handle_client(actors: Arc<ActorRegistry>, mut stream: TcpStream, stream_id: StreamId) {
+fn handle_client(
+    actors: Arc<ActorRegistry>,
+    mut stream: TcpStream,
+    stream_id: StreamId,
+    connections: Arc<Mutex<FxHashMap<StreamId, TcpStream>>>,
+    sender: Sender<DevtoolsControlMsg>,
+) {
     log::info!("Connection established to {}", stream.peer_addr().unwrap());
     let msg = actors.encode::<RootActor, _>("root");
     if let Err(error) = stream.write_json_packet(&msg) {
@@ -724,6 +760,9 @@ fn handle_client(actors: Arc<ActorRegistry>, mut stream: TcpStream, stream_id: S
             },
         }
     }
+
+    connections.lock().unwrap().remove(&stream_id);
+    let _ = sender.send(DevtoolsControlMsg::ClientExited);
 
     actors.cleanup(stream_id);
 }
