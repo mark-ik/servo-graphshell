@@ -1,207 +1,128 @@
 # GRAPHSHELL AS A WEB BROWSER
 
-**Purpose**: Detailed specification for how Graphshell operates as a functional web browser (graph-first UX with a Servo-backed detail view).
+**Purpose**: Detailed specification for how Graphshell operates as a functional web browser.
 
-**Document Type**: Behavior specification (not implementation status)  
-**Status**: Core browsing graph functional (~4,500 LOC), Servo integration complete  
+**Document Type**: Behavior specification (not implementation status)
+**Status**: Core browsing graph functional (~4,500 LOC), Servo integration complete
 **See**: [ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md) for actual code status
 
 ---
 
-## Design Principle: Graph-First, Cluster-Second
+## Design Principle: Unified Spatial Tab Manager
 
-Unlike Firefox (tabs are primary), Graphshell inverts the relationship:
-- **Primary interface**: Force-directed graph of webpages
-- **Secondary interface**: Detail view + cluster strip (linear projection of the graph)
-- **Implicit history**: Graph edges track navigation/relationships
-- **Browser history**: Per-node history stack (like browser back/forward)
+Graphshell is a spatial tab manager. The graph, tile tree, and tab bars are all projections of the same underlying state: the set of webviews (active or inactive). Mutations from any context propagate to all others.
+
+- **Graph view**: Overview and organizational control surface. Drag nodes between clusters, create edges, delete nodes — all affect the tile tree and webviews.
+- **Tile panes**: Focused working contexts. Each pane's tab bar shows the nodes in that pane's cluster. Closing a tab closes the webview and removes the node.
+- **Tab bars**: Per-pane projections of graph clusters. Active tabs (with webview) are highlighted; inactive tabs (no webview) are dimmed and reactivatable.
+
+**Key invariant**: There is one source of truth — the webview set. Graph, tile tree, and tab bars are derived views that can each initiate mutations.
 
 ---
 
-## 1. Navigation Model
+## 1. Graph-Tile-Webview Relationship
 
-### Link Clicking in Webview
+### Node Identity
 
-**Scenario**: User is in detail view of node A (viewing https://example.com/page1), clicks a link to https://example.com/page2
+Each node IS a tab. Node identity is the tab itself, not its URL.
 
-**Recommended behavior**:
+- **URLs are mutable**: Within-tab navigation changes the node's current URL. The node persists.
+- **Duplicate URLs allowed**: The same URL can be open in multiple tabs (multiple nodes). Each is independent.
+- **Stable ID**: Nodes are identified by a stable UUID (not URL, not petgraph NodeIndex). Persistence uses this UUID.
+- **Per-node history**: Each node has its own back/forward stack. Servo provides this via `notify_history_changed(webview, entries, index)`.
 
-```rust
-pub enum LinkClickBehavior {
-    /// Reuse existing node if URL already open
-    ReuseIfExists,
-    
-    /// Create new node for every link
-    AlwaysNew,
-    
-    /// Create new only if different domain
-    NewPerDomain,
-}
+### Servo Signals
 
-// Graphshell should implement: ReuseIfExists (like a cluster strip entry, but for graph)
+Servo provides two distinct signals that drive the graph (no Servo modifications required):
 
-impl DetailView {
-    pub fn on_link_clicked(&mut self, url: &Url) -> Action {
-        if let Some(existing_node) = self.graph.find_node_by_url(url) {
-            // Node already exists in graph
-            return Action::SwitchToNode(existing_node.id);
-        } else {
-            // New URL: create node near current node
-            let new_node = Node {
-                url: url.clone(),
-                position: self.current_node.position + random_offset(),
-                title: "[Loading...]".to_string(),
-                velocity: Vector2D::zero(),
-            };
-            
-            // Create edge from current → new (manual type, tracks navigation)
-            let edge = Edge {
-                from: self.current_node.id,
-                to: new_node.id,
-                edge_type: EdgeType::Manual,  // User navigated here
-                weight: 1.0,
-            };
-            
-            self.graph.add_node(new_node.clone());
-            self.graph.add_edge(edge);
-            
-            // Fetch metadata in background
-            self.spawn_metadata_fetch_async(new_node.id, url);
-            
-            return Action::SwitchToNode(new_node.id);
-        }
-    }
-}
-```
+| User action | Servo delegate method | Graph effect |
+|-------------|----------------------|--------------|
+| Click link (same tab) | `notify_url_changed(webview, url)` | Update node's current URL and title. Push to history. No new node. |
+| Back/forward | `notify_url_changed(webview, url)` | Update node's URL. History index changes. No new node. |
+| Ctrl+click / middle-click / window.open | `request_create_new(parent_webview, request)` | Create new node. Create edge from parent node. Add to parent's tab container. |
+| Title change | `notify_title_changed(webview, title)` | Update node's title. |
+| History update | `notify_history_changed(webview, entries, index)` | Store back/forward list on node (from Servo, not custom). |
 
-**Result**: Graph grows organically as user browses. Clicking same link multiple times reuses node (like cluster strip entries).
+### Edge Types
+
+| Edge type | Created by | Meaning |
+|-----------|-----------|---------|
+| `Hyperlink` | `request_create_new` (new tab from parent) | User opened a new tab from this page |
+| `History` | Back/forward detection (existing reverse edge) | Navigation reversal |
+| `UserGrouped` | Dragging a tab/node to a different pane in graph or tile view | User deliberately associated these tabs |
+
+### Pane Membership
+
+- **Tile tree is the authority** on which node lives in which pane.
+- **Navigation routing**: New nodes from `request_create_new` are added to the parent node's tab container.
+- **New root node** (N key, no parent): Creates a new tab container in the tile tree.
+- **Tab move** (drag between panes): Moves the tile. Creates a `UserGrouped` edge to the destination cluster's root. Old navigation edges remain as history.
+
+### Node Lifecycle
+
+| State | Has webview? | Shown in tab bar? | Shown in graph? |
+|-------|-------------|-------------------|-----------------|
+| **Active** | Yes | Yes (highlighted) | Yes (full color) |
+| **Inactive** | No (suspended) | Yes (dimmed) | Yes (dimmed) |
+| **Closed** | No (destroyed) | No | No |
+
+- Navigate away from a tab: old node becomes **inactive** (no webview, still in tab bar).
+- Click inactive tab: **reactivates** it (creates webview, navigates to its current URL).
+- Close tab (from tab bar, graph, or keyboard): node becomes **closed** (removed from everything).
+
+### Intent-Based Mutation
+
+All user interactions produce intents processed at a single sync point per frame. No system directly mutates another mid-frame.
+
+Sources of intents:
+- **Graph view**: drag-to-cluster, delete node, create edge, select
+- **Tile/tab bar**: close tab, reorder tabs, drag tab to other pane
+- **Keyboard**: N (new node), Del (remove), T (physics toggle), etc.
+- **Servo callbacks**: `request_create_new`, `notify_url_changed`, `notify_title_changed`
+
+All intents are collected, then applied to graph + tile tree + webview set together at one point in the frame loop. This prevents the contradictory-update bugs that arise from bidirectional mutation.
+
+---
+
+## 2. Navigation Model
+
+### Within-Tab Navigation (Link Click)
+
+**Scenario**: User is in a pane viewing node A (github.com), clicks a link to github.com/servo.
+
+**Behavior**: The node's URL updates. No new node is created. Servo's `notify_url_changed` fires.
+
+- Node A's `current_url` changes to github.com/servo
+- Node A's title updates when `notify_title_changed` fires
+- Node A's history stack gains an entry (provided by `notify_history_changed`)
+- The tab bar entry for A updates to show the new title/URL
+- No edge created, no new node
+
+### Open New Tab (Ctrl+Click, Middle-Click, window.open)
+
+**Scenario**: User Ctrl+clicks a link on node A, opening it in a new tab.
+
+**Behavior**: A new node is created with an edge from A. Servo's `request_create_new` fires.
+
+- New node B created with the target URL
+- Edge A → B created (type: Hyperlink)
+- B's tile added to A's tab container (same pane)
+- B becomes the active tab in that pane
+- A becomes inactive (no webview, still in tab bar)
 
 ### Back/Forward Navigation
 
-**Scenario**: User is in detail view, wants to go back to previous page
+**Scenario**: User presses back button in the browser UI.
 
-**Expected**: Ctrl+[ (back), Ctrl+] (forward) buttons or navigation UI
+**Behavior**: Servo traverses its own history stack. `notify_url_changed` fires with the previous URL. The node's URL updates. No new node.
 
-**Recommended implementation**:
+Servo provides the full back/forward list via `notify_history_changed(webview, entries, index)`. Graphshell stores this on the node or reads it from the WebView on demand — no need to maintain a custom history stack.
 
-```rust
-pub struct DetailView {
-    current_node: NodeKey,
-    history_stack: Vec<NodeKey>,      // Back stack
-    forward_stack: Vec<NodeKey>,       // Forward stack
-}
+### New Root Tab (N Key)
 
-impl DetailView {
-    pub fn go_back(&mut self) -> Result<()> {
-        if let Some(prev_node) = self.history_stack.pop() {
-            self.forward_stack.push(self.current_node);
-            self.current_node = prev_node;
-            self.render();
-            Ok(())
-        } else {
-            Err("No history".into())
-        }
-    }
-    
-    pub fn go_forward(&mut self) -> Result<()> {
-        if let Some(next_node) = self.forward_stack.pop() {
-            self.history_stack.push(self.current_node);
-            self.current_node = next_node;
-            self.render();
-            Ok(())
-        } else {
-            Err("No forward history".into())
-        }
-    }
-    
-    pub fn switch_to_node(&mut self, target: NodeKey) {
-        self.history_stack.push(self.current_node);
-        self.forward_stack.clear();  // Clear forward on new navigation
-        self.current_node = target;
-    }
-}
-```
+**Scenario**: User presses N to create a blank tab.
 
-**Key insight**: Per-node history is separate from graph edges.
-- **Edges**: Intentional relationships (what you're studying)
-- **History stack**: Browsing sequence (chronological)
-
-### Global Browser History
-
-**Scenario**: User wants to see all pages visited (across all nodes)
-
-**Recommended**:
-
-```rust
-pub struct GlobalHistory {
-    entries: Vec<HistoryEntry>,  // Ordered by timestamp
-}
-
-pub struct HistoryEntry {
-    url: Url,
-    title: String,
-    timestamp: Timestamp,
-    node_id: NodeKey,
-    duration_on_page: Duration,  // How long user spent on page
-    referrer: Option<Url>,       // Page they came from
-}
-
-impl GlobalHistory {
-    pub fn most_visited(&self) -> Vec<&HistoryEntry> {
-        // Return entries grouped by URL, sorted by visit count
-    }
-    
-    pub fn recent(&self, limit: usize) -> Vec<&HistoryEntry> {
-        self.entries.iter().rev().take(limit).collect()
-    }
-}
-```
-
-**UI**: History sidebar (Phase 2) shows timeline, filterable by date/domain.
-
----
-
-## 2. Form State & Page Interactions
-
-**Problem**: User fills form on page, submits, gets result page. What should Graphshell do?
-
-**Scenario**:
-- Node A = search.example.com with search form
-- User types query, submits
-- New page (search results) loads
-- Is this a new node or update to existing node?
-
-**Recommended behavior: Update existing node**
-
-```rust
-impl DetailView {
-    pub fn on_page_loaded(&mut self, new_url: &Url, title: &str) {
-        let old_url = &self.current_node.url;
-        
-        if same_origin(old_url, new_url) {
-            // Same origin: update in-place (form submission, SPA navigation)
-            self.graph.node_mut(self.current_node.id).url = new_url.clone();
-            self.graph.node_mut(self.current_node.id).title = title.to_string();
-        } else {
-            // Different origin: create new node
-            let new_node = self.graph.add_node(Node {
-                url: new_url.clone(),
-                title: title.to_string(),
-                position: self.current_node.position + offset,
-                ..
-            });
-            self.graph.add_edge(Edge {
-                from: self.current_node.id,
-                to: new_node.id,
-                edge_type: EdgeType::Manual,
-            });
-            self.switch_to_node(new_node.id);
-        }
-    }
-}
-```
-
-**Result**: Form submission on same origin updates node (cleaner graph). Cross-origin submission creates new node.
+**Behavior**: New node created with `about:blank`. New tab container created in tile tree. No parent, no edge.
 
 ---
 
@@ -211,123 +132,28 @@ impl DetailView {
 
 **Expected**: Browser-like bookmark UI
 
-**Recommended**:
-
-```rust
-pub struct BookmarkManager {
-    bookmarks: HashMap<NodeKey, Bookmark>,
-}
-
-pub struct Bookmark {
-    node_id: NodeKey,
-    added_at: Timestamp,
-    folder: Option<String>,       // "Research/React", "Tools", etc.
-    tags: Vec<String>,
-}
-
-impl DetailView {
-    pub fn bookmark_current(&mut self) -> Result<()> {
-        self.bookmarks.insert(self.current_node.id, Bookmark {
-            node_id: self.current_node.id,
-            added_at: now(),
-            folder: Some("Inbox".to_string()),
-            tags: vec![],
-        });
-        
-        // Create bookmark edge for visualization
-        // (optional, could also hide in UI)
-        
-        Ok(())
-    }
-}
-```
-
-**UI**:
-- Ctrl+B toggles bookmark for current node (adds Bookmark icon)
-- Sidebar (Phase 2) shows bookmark folders
-- Import bookmarks.html from Firefox
+- Ctrl+B toggles bookmark for current node
+- Bookmarks are metadata on nodes (tag/flag), not separate entities
+- Bookmark folders map to user-defined groupings
+- Import bookmarks.html from Firefox creates nodes + edges
 
 ---
 
 ## 4. Downloads & Files
 
-**Scenario**: User downloads a file from a webpage
+**Scenario**: User downloads a file from a webpage.
 
-**Recommended**:
-
-```rust
-pub struct Download {
-    id: DownloadId,
-    source_node_id: NodeKey,
-    url: Url,
-    filename: String,
-    size: u64,
-    progress: f32,            // 0.0 to 1.0
-    state: DownloadState,
-}
-
-pub enum DownloadState {
-    Pending,
-    InProgress,
-    Completed(PathBuf),
-    Failed(String),
-    Paused,
-}
-
-pub struct DownloadManager {
-    downloads: HashMap<DownloadId, Download>,
-}
-
-impl DetailView {
-    pub fn on_download_started(&mut self, url: &Url, filename: &str) {
-        let dl = Download {
-            id: DownloadId::new(),
-            source_node_id: self.current_node.id,
-            url: url.clone(),
-            filename: filename.to_string(),
-            size: 0,
-            progress: 0.0,
-            state: DownloadState::Pending,
-        };
-        self.downloads.insert(dl.id, dl);
-    }
-}
-```
-
-**UI**: Downloads sidebar (Phase 2) shows in-progress + completed downloads.
+- Download tracked with source node reference
+- Downloads sidebar (Phase 2) shows in-progress + completed
+- Download metadata stored per-node for provenance
 
 ---
 
 ## 5. Search & Address Bar
 
-**Current**: Omnibar (graph-based search)
-
-**Missing**: Ability to navigate directly to URL
-
-**Recommended**:
-
-```rust
-pub enum OmnibarMode {
-    SearchGraph,        // Default: search nodes by title/tags
-    NavigateToUrl,      // "http://example.com" → create/switch node
-}
-
-impl Omnibar {
-    pub fn on_input(&mut self, input: &str) {
-        if input.starts_with("http://") || input.starts_with("https://") {
-            // URL navigation
-            let url = Url::parse(input).unwrap();
-            self.emit_event(OmnibarEvent::NavigateToUrl(url));
-        } else {
-            // Graph search
-            let results = self.search_graph(input);
-            self.emit_event(OmnibarEvent::SearchResults(results));
-        }
-    }
-}
-```
-
-**UX**: Omnibar works for both search (graph) and navigation (URL).
+- Omnibar serves dual purpose: graph search + URL navigation
+- URL input (`http://...`) navigates the current tab (within-tab navigation)
+- Text input searches node titles/URLs (fuzzy, via nucleo in FT6)
 
 ---
 
@@ -335,17 +161,18 @@ impl Omnibar {
 
 | Feature | Firefox | Graphshell |
 |---------|---------|-------|
-| **Primary UI** | Tab bar | Force-directed graph + cluster strip |
-| **Navigation** | Click link → new tab | Click link → new/existing node |
-| **History** | Browser history | Graph edges + per-node stack |
-| **Bookmarks** | Bookmark folder tree | Nodes tagged as bookmarks |
-| **Data portability** | HTML bookmarks | JSON, HTML, markdown |
+| **Primary UI** | Tab bar | Force-directed graph + tiled panes |
+| **Tab management** | Linear tab strip | Spatial graph (drag, cluster, edge) |
+| **Navigation** | Click link → same tab or new tab | Same: within-tab nav or new tab |
+| **History** | Global linear history | Per-node history (from Servo) + graph edges |
+| **Tab grouping** | Manual tab groups | Graph clusters = pane tab bars |
+| **Bookmarks** | Folder tree | Node metadata (tags/flags) |
 
-**Core difference**: Graphshell treats navigation as graph construction, not sequential lists.
+**Core difference**: The graph is the organizational layer. Tab bars are projections of graph clusters. What you do in the graph is what the tile tree becomes.
 
 ---
 
 ## Related
 
-- P2P collaboration and decentralized sync: [verse_docs/GRAPHSHELL_P2P_COLLABORATION.md](verse_docs/GRAPHSHELL_P2P_COLLABORATION.md)
-- Architecture decisions and implementation milestones: [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md), [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)
+- Graph-tile unification plan: [implementation_strategy/2026-02-13_graph_tile_unification_plan.md](implementation_strategy/2026-02-13_graph_tile_unification_plan.md)
+- Architecture and code status: [ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md), [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)

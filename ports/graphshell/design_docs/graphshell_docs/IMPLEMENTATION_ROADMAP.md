@@ -45,7 +45,8 @@ These five features enable the core MVP: **users can browse real websites in a s
 | 4 | Camera Zoom Integration | ✅ Complete | egui_graphs built-in zoom/pan + post-frame clamp |
 | 5 | Center Camera | ✅ Complete | egui_graphs fit_to_screen via C key |
 
-**Execution order now**:
+**Execution order now:**
+
 1. Physics migration (see implementation_strategy/2026-02-12_physics_selection_plan.md)
 2. Selection consolidation (same plan)
 3. FT2 thumbnail completion (see implementation_strategy/2026-02-11_thumbnails_favicons_plan.md)
@@ -287,7 +288,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 ### Feature Target 8: Performance Optimization
 
-**Goal**: 500 nodes @ 45fps, 1000 nodes @ 30+fps (usable), smooth interaction.
+**Goal**: 500 nodes @ 45fps, 1000 nodes @ 30+fps (usable), smooth interaction. Realistic baseline: power users with 100+ tabs produce ~100-300 nodes; 500-1000 is a stress target.
 
 **Tasks**:
 
@@ -295,8 +296,8 @@ These five features enable the core MVP: **users can browse real websites in a s
 2. Batch node rendering (single draw call for all circles)
 3. Cull off-screen nodes (simple rect test, skip if out of viewport)
 4. LOD (level-of-detail): cluster distant nodes when zoomed out
-5. Measure physics simulation time (ensure <16ms per frame)
-6. Optimize spatial hash grid (tune cell size, benchmark neighbor queries)
+5. Measure FR layout time per frame (ensure <16ms at target node counts)
+6. Profile egui_graphs GraphView overhead at scale
 
 **Validation Tests**:
 
@@ -381,7 +382,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 | ------- | ----- | ------ |
 | Graph data structure | **petgraph** 0.8 | ✅ StableGraph as primary store |
 | Graph visualization | **egui_graphs** 0.29 | ✅ GraphView widget, events, navigation |
-| Spatial queries | **kiddo** 4.2 | ✅ KD-tree for physics neighbor lookup |
+| Spatial queries | **kiddo** 4.2 | Used by custom physics only; planned for removal with physics migration |
 | Persistence snapshots | **redb** 2 | ✅ Periodic full graph snapshots |
 | Persistence log | **fjall** 3 | ✅ Append-only mutation log |
 | Serialization | **rkyv** 0.8 | ✅ Zero-copy, used by both fjall and redb |
@@ -458,4 +459,3 @@ These five features enable the core MVP: **users can browse real websites in a s
 - **Project Vision**: `PROJECT_DESCRIPTION.md`
 - **Architecture**: `ARCHITECTURAL_OVERVIEW.md`
 - **Code**: `ports/graphshell/` (~4,500 LOC in core modules)
-

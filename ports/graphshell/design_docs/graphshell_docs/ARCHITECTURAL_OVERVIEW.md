@@ -1,15 +1,17 @@
 # Graphshell Architectural Overview
 
-**Last Updated**: February 11, 2026
-**Status**: Core browsing graph functional — Servo integration, persistence, zoom/camera, physics all working
+**Last Updated**: February 13, 2026
+**Status**: Core browsing graph functional — Servo integration, egui_tiles multi-pane, persistence, zoom/camera all working
 
 ---
 
 ## Project Vision
 
-Graphshell is a **spatial browser** where webpages are nodes in a force-directed graph instead of tabs in a bar. Users navigate by seeing and interacting with the topology of their browsing session.
+Graphshell is a **spatial tab manager** where webpages are nodes in a force-directed graph instead of tabs in a bar. The graph, tile tree, and per-pane tab bars are all projections of the same source of truth: the set of webviews (active or inactive). Mutations from any context propagate to all others.
 
 **Core Idea**: Replace linear history with spatial memory. Instead of "Back/Forward," you see where you came from and where pages link to.
+
+**See**: [GRAPHSHELL_AS_BROWSER.md](GRAPHSHELL_AS_BROWSER.md) for the full behavioral specification of the unified graph-tile-webview model.
 
 ---
 
@@ -19,8 +21,8 @@ Graphshell is a **spatial browser** where webpages are nodes in a force-directed
 
 **Graph Core** (`graph/mod.rs`, 461 lines)
 - `Graph`: petgraph `StableGraph<Node, EdgeType, Directed>` as primary store
-- `Node`: URL, title, position, velocity, selection, pinned, lifecycle (Active/Cold)
-- `EdgeType`: Hyperlink (link click), History (back/forward)
+- `Node`: URL, title, position, velocity, pinned, lifecycle (Active/Inactive/Closed), favicon data
+- `EdgeType`: Hyperlink (new tab from parent), History (back/forward), UserGrouped (manual tab move)
 - `NodeKey = NodeIndex`, `EdgeKey = EdgeIndex` — stable handles surviving deletions
 - `url_to_node: HashMap<String, NodeKey>` for O(1) URL lookup
 - `out_neighbors()`, `in_neighbors()`, `has_edge_between()` for traversal
@@ -32,17 +34,23 @@ Graphshell is a **spatial browser** where webpages are nodes in a force-directed
 - Lifecycle-based styling: Active (blue, r=15), Cold (gray, r=10), Selected (gold)
 - Rebuilt only when `egui_state_dirty` flag is set (structural changes)
 
-**Physics Engine** (`physics/mod.rs`, 385 lines)
+**Tile Tree** (`desktop/gui.rs` tile integration)
+- egui_tiles multi-pane runtime: tile tree, per-pane rendering contexts, tile layout persistence
+- Each tile pane has a tab bar showing its cluster's nodes (connected by edges)
+- Tile-derived view state (legacy `View` enum retired)
+- Tab bars are projections of graph clusters; closing a tab removes the node everywhere
+
+**Physics Engine** (`physics/mod.rs`, 385 lines) — **Planned for replacement**
 - Force-directed layout: repulsion (spatial hash O(n)), spring attraction (Hooke's law), damping
 - Auto-pause on convergence (monitors max velocity, pauses after configurable delay)
-- Configurable: repulsion 5000.0, spring 0.1, damping 0.92, rest length 100px, repulsion radius 300px
-- Spatial grid (`spatial.rs`): kiddo KD-tree for efficient neighbor queries
+- **Known bug**: Springs applied over both `out_neighbors` AND `in_neighbors`, doubling effective attraction
+- Will be replaced by egui_graphs `FruchtermanReingold` — see [physics_selection_plan.md](implementation_strategy/2026-02-12_physics_selection_plan.md)
+- Spatial grid (`spatial.rs`): kiddo KD-tree — will be removed (unnecessary at browsing scale)
 
-**Physics Worker** (`physics/worker.rs`, 221 lines)
+**Physics Worker** (`physics/worker.rs`, 221 lines) — **Planned for removal**
 - Background thread using `crossbeam_channel` for non-blocking simulation
-- Commands: UpdateGraph, Step, Toggle, Pause, Resume, UpdateConfig, Shutdown
-- Responses: NodePositions (HashMap updates), IsRunning status
-- 60 FPS target, sends position updates back to main thread
+- Unnecessary for browsing-scale graphs (~100-300 nodes); egui_graphs FR runs synchronously on UI thread
+- Will be deleted as part of physics migration
 
 **Rendering** (`render/mod.rs`, 339 lines)
 - Delegates graph visualization to `egui_graphs::GraphView` widget
@@ -60,10 +68,10 @@ Graphshell is a **spatial browser** where webpages are nodes in a force-directed
   - `Del` remove selected, `Ctrl+Shift+Del` clear graph
 
 **Application State** (`app.rs`, 590 lines)
-- View model: `View::Graph` or `View::Detail(NodeKey)`
+- Tile-derived view state (graph pane vs detail panes determined by tile tree)
 - Bidirectional webview↔node mapping: `HashMap<WebViewId, NodeKey>` and inverse
 - Selection management (single/multi), focus switching
-- Physics worker lifecycle (sync graph, receive positions)
+- Physics worker lifecycle (sync graph, receive positions) — planned for removal
 - Persistence integration: log mutations, periodic snapshots
 - `egui_state_dirty` flag controls when egui_graphs state is rebuilt
 - Camera: zoom bounds (0.1x–10.0x), post-frame clamping via `MetadataFrame`
@@ -75,24 +83,28 @@ Graphshell is a **spatial browser** where webpages are nodes in a force-directed
 - Startup recovery: load latest snapshot → replay log entries since snapshot
 - Aligned data handling: `AlignedVec` for rkyv deserialization from redb bytes
 
-**Servo Integration** (`desktop/gui.rs`, 978 lines)
-- Full webview lifecycle: create/destroy webviews based on view state
+**Servo Integration** (`desktop/gui.rs` + `desktop/webview_controller.rs`, ~1,100 lines total)
+- Full webview lifecycle: create/destroy webviews based on tile tree state
 - Graph view: destroy all webviews (prevent framebuffer bleed), save node list for restoration
 - Detail view: recreate webviews for saved nodes, create for newly focused nodes
-- Navigation tracking: `sync_webviews_to_graph()` detects URL changes, creates nodes + edges
-- URL bar: Enter in graph view updates node URL and switches to detail view
-- Edge creation: Hyperlink for new navigation, History for back/forward (detected by existing reverse edge)
+- Navigation tracking: `sync_webviews_to_graph()` detects URL changes, creates edges
+- Servo signals: `request_create_new` (new tab), `notify_url_changed` (within-tab nav), `notify_title_changed`
+- Edge creation: Hyperlink for new tab from parent, History for back/forward (existing reverse edge)
 
 ### Not Yet Implemented
 
 **Planned for Phase 1 completion:**
-1. **Thumbnails & Favicon Rendering** — Nodes show page screenshots or favicons instead of colored circles
+
+1. **Physics migration** — Replace custom physics/worker with egui_graphs FruchtermanReingold ([plan](implementation_strategy/2026-02-12_physics_selection_plan.md))
+2. **Selection consolidation** — Remove duplicated selection state (same plan)
+3. **Graph-tile unification** — Implement unified spatial tab manager model ([plan](implementation_strategy/2026-02-13_graph_tile_unification_plan.md))
+4. **Thumbnails & Favicon Rendering** — Nodes show page screenshots or favicons (favicon vertical slice done)
 
 **Phase 2+ features (not started):**
+
 - Search/filtering (nucleo fuzzy search)
 - Bookmarks/history import
 - Clipping (DOM element extraction)
-- Split view (egui_tiles)
 - Diagnostic/Engine Inspector mode
 - P2P collaboration (Verse)
 
@@ -111,10 +123,12 @@ Graphshell is a **spatial browser** where webpages are nodes in a force-directed
 **Why URL-to-NodeKey HashMap?**
 - Fast duplicate detection: "Does this URL already have a node?"
 - O(1) lookup for persistence recovery (log replay uses URLs as stable identity)
+- **Note**: The unified model allows duplicate URLs (same URL in multiple tabs). Node identity will migrate from URL-based to UUID-based. See [graph_tile_unification_plan.md](implementation_strategy/2026-02-13_graph_tile_unification_plan.md).
 
 **Why NodeIndex keys not stable across sessions?**
 - petgraph NodeIndex values change when graph is rebuilt from persistence
 - URL-based identity used for persistence (snapshot + log use URLs, not indices)
+- Planned: UUID-based stable identity that survives across sessions and allows duplicate URLs
 
 ### Rendering & UI
 
@@ -124,15 +138,35 @@ Graphshell is a **spatial browser** where webpages are nodes in a force-directed
 - Event-driven interaction model (events collected in `Rc<RefCell<Vec<Event>>>`)
 - Reduced custom rendering code by ~80% (input went from 313 → 100 LOC)
 
-**Why `LayoutRandom` (no-op layout)?**
-- Our custom physics engine controls node positions
-- egui_graphs just renders whatever positions we set
-- Positions synced from physics worker every frame
+**Why `LayoutRandom` (no-op layout)?** — **Will be replaced**
+- Currently: custom physics engine controls node positions; egui_graphs just renders
+- Planned: switch to egui_graphs `FruchtermanReingold` force-directed layout
+- Custom `PinnedFruchtermanReingold` wrapper will skip displacement for pinned nodes
+- See [physics_selection_plan.md](implementation_strategy/2026-02-12_physics_selection_plan.md)
 
 **Why post-frame zoom clamp?**
 - egui_graphs has no built-in zoom bounds
 - Read `MetadataFrame` from egui's persisted data after `GraphView` renders
 - Clamp zoom value, write back if changed
+
+### Graph-Tile-Webview Unified Model
+
+**Why one source of truth (the webview set)?**
+- Graph, tile tree, and tab bars are all projections of the same state: the set of webviews (active or inactive)
+- Mutations from any context (graph drag, tab close, keyboard shortcut, Servo callback) produce intents processed at a single sync point per frame
+- Prevents contradictory-update bugs that arise from bidirectional mutation between graph and tile tree
+- See [GRAPHSHELL_AS_BROWSER.md](GRAPHSHELL_AS_BROWSER.md) for the full behavioral specification
+
+**Why intent-based mutation?**
+- Extends existing `GraphAction`/`KeyboardActions` pattern to cover tile operations
+- All interactions produce intents collected during the frame, applied together at one sync point
+- No system directly mutates another mid-frame — eliminates the class of bugs from the servoshell tab UI adaptation
+
+**Why nodes ARE tabs (not representations of tabs)?**
+- Node identity is the tab itself (stable UUID), not its URL
+- Within-tab navigation updates the node's URL; no new node created
+- Duplicate URLs allowed (same URL open in multiple tabs = multiple independent nodes)
+- Per-node history provided by Servo's `notify_history_changed`, not custom stacks
 
 ### Webview Lifecycle
 
@@ -169,11 +203,12 @@ If sync runs before lifecycle or in graph view, it sees stale webviews and creat
 | `petgraph` 0.8 | Graph data structure | StableGraph, algorithms via trait imports |
 | `egui_graphs` 0.29 | Graph visualization | GraphView widget, events, navigation |
 | `egui` 0.33.3 | UI framework | Immediate mode, integrated with Servo |
-| `kiddo` 4.2 | KD-tree spatial queries | Physics neighbor lookup |
+| `egui_tiles` | Multi-pane tile layout | Tile tree, per-pane tab bars |
+| `kiddo` 4.2 | KD-tree spatial queries | Physics only; planned for removal |
 | `fjall` 3 | Append-only log | Persistence mutations |
 | `redb` 3 | KV store | Persistence snapshots |
 | `rkyv` 0.8 | Serialization | Zero-copy, used by both fjall and redb |
-| `crossbeam` | Worker channels | Physics thread communication |
+| `crossbeam` | Worker channels | Physics thread + running_app_state |
 | `euclid` | 2D geometry | Point2D, Vector2D throughout |
 
 ---
@@ -262,6 +297,14 @@ Scope: Readme/docs and selected files from GraphRAG, Midori Desktop, egui_node_g
 - `ports/graphshell/` — Main implementation (~4,500 LOC in core modules)
 - `ports/servoshell/` — Base shell (windowing, event loop, WebRender) — graphshell extends this
 - `components/servo/` — libservo (browser engine)
+
+**Design Specs**:
+- [GRAPHSHELL_AS_BROWSER.md](GRAPHSHELL_AS_BROWSER.md) — Unified graph-tile-webview behavioral specification
+- [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md) — Feature targets and execution order
+
+**Implementation Plans**:
+- [physics_selection_plan.md](implementation_strategy/2026-02-12_physics_selection_plan.md) — Physics migration + selection consolidation
+- [graph_tile_unification_plan.md](implementation_strategy/2026-02-13_graph_tile_unification_plan.md) — Graph-tile-webview unification implementation
 
 **Checkpoint Analyses**:
 - `archive_docs/checkpoint_2026-02-10/2026-02-10_crate_refactor_plan.md` — egui_graphs + petgraph + kiddo integration history
