@@ -211,6 +211,12 @@ Tile Tree Interactions
    - Blocked by: Phase 2 (Servo signal wiring)
    - Workaround: None; current behavior is semantically wrong
 
+---
+
+## Research Conclusion (2026-02-15)
+
+Recent fix attempts showed that patching around window-global routing does not fix the underlying semantic drift. The root issue is that navigation is still driven by polling (`sync_to_graph`) rather than delegate callbacks, so same-tab navigation is mis-modeled as new-node creation. The conclusion is to make `notify_url_changed` authoritative, remove polling-based node creation, and add an explicit intent boundary to serialize multi-source mutations. See NAVIGATION_NEXT_STEPS_OPTIONS.md for the decision options.
+
 2. **no mode-dependent intent mapping**
    - Blocks: close_tab being either delete or hide depending on mode
    - Blocked by: Policy layer design

@@ -1,6 +1,6 @@
 # Graphshell Design Documentation Index
 
-**Last Updated**: February 14, 2026
+**Last Updated**: February 15, 2026
 **Status**: Core browsing graph functional; active path is reducer-driven semantics with UUID identity and no-legacy policy
 
 ---
@@ -94,6 +94,7 @@
 | **[implementation_strategy/2026-02-11_phase1_refinement_plan.md](implementation_strategy/2026-02-11_phase1_refinement_plan.md)** | **Active:** Phase 1 refinement (11 steps) | Current work reference |
 | **[implementation_strategy/2026-02-12_persistence_ux_plan.md](implementation_strategy/2026-02-12_persistence_ux_plan.md)** | Persistence reset UX plan | Reference (completed) |
 | **[implementation_strategy/2026-02-12_physics_selection_plan.md](implementation_strategy/2026-02-12_physics_selection_plan.md)** | Physics migration + selection consolidation plan | Current work reference |
+| **[implementation_strategy/2026-02-15_navigation_control_plane_plan.md](implementation_strategy/2026-02-15_navigation_control_plane_plan.md)** | Servoshell control-path constraints, validated findings, and navigation decontamination plan | Current work reference |
 
 **Architecture Plans**
 

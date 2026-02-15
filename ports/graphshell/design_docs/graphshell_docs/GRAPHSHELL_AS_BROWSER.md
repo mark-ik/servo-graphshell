@@ -43,6 +43,12 @@ Servo provides two distinct signals that drive the graph (no Servo modifications
 | Title change | `notify_title_changed(webview, title)` | Update node's title. |
 | History update | `notify_history_changed(webview, entries, index)` | Store back/forward list on node (from Servo, not custom). |
 
+---
+
+## Research Conclusions (2026-02-15)
+
+Recent fixes confirmed a gap between this model and current runtime behavior. The implementation still relies on URL polling in `sync_to_graph` and does not treat `notify_url_changed` as the primary driver for same-tab navigation. This leads to node creation at the wrong times and makes navigation target selection fragile when window-global routing is used. The conclusion is to move navigation to the delegate-driven path, remove polling-based node creation, and enforce an explicit intent boundary for multi-source mutations. See NAVIGATION_NEXT_STEPS_OPTIONS.md for the decision options.
+
 ### Edge Types
 
 | Edge type | Created by | Meaning |

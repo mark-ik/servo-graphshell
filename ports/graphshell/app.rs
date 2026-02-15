@@ -409,14 +409,9 @@ impl GraphBrowserApp {
                 if new_url.is_empty() {
                     return;
                 }
-                let node_key = if let Some(node_key) = self.get_node_for_webview(webview_id) {
-                    node_key
-                } else {
-                    let node_key =
-                        self.add_node_and_sync(new_url.clone(), Point2D::new(400.0, 300.0));
-                    self.map_webview_to_node(webview_id, node_key);
-                    self.promote_node_to_active(node_key);
-                    node_key
+                let Some(node_key) = self.get_node_for_webview(webview_id) else {
+                    // URL change should update an existing tab/node, not create a new node.
+                    return;
                 };
                 if let Some(node) = self.graph.get_node_mut(node_key) {
                     node.last_visited = std::time::SystemTime::now();

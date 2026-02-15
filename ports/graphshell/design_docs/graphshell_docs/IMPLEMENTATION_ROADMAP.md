@@ -2,7 +2,7 @@
 
 **Document Type**: Feature-driven implementation plan
 **Organization**: By feature targets with validation tests (not calendar time)
-**Last Updated**: February 14, 2026
+**Last Updated**: February 15, 2026
 **Priority Focus**: FT2/FT6 landed; continue post-core polish
 
 **Policy Note (2026-02-14)**: Graphshell has no production users and no legacy dataset obligations. Do not add backward-compat contingency branches unless explicitly requested.
@@ -47,10 +47,11 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 **Execution order now:**
 
-1. Physics migration (see implementation_strategy/2026-02-12_physics_selection_plan.md)
-2. Selection consolidation (same plan)
-3. FT2 thumbnail completion ✅
-4. FT6 search/filtering (`nucleo`) ✅
+1. Navigation control-plane stabilization (see implementation_strategy/2026-02-15_navigation_control_plane_plan.md)
+2. Physics migration (see implementation_strategy/2026-02-12_physics_selection_plan.md)
+3. Selection consolidation (same plan)
+4. FT2 thumbnail completion ✅
+5. FT6 search/filtering (`nucleo`) ✅
 
 ---
 

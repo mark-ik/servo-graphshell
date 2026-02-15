@@ -27,6 +27,7 @@ pub(crate) struct GraphshellTileBehavior<'a> {
     search_query_active: bool,
     pending_open_nodes: Vec<NodeKey>,
     pending_closed_nodes: Vec<NodeKey>,
+    pending_graph_intents: Vec<GraphIntent>,
 }
 
 impl<'a> GraphshellTileBehavior<'a> {
@@ -47,6 +48,7 @@ impl<'a> GraphshellTileBehavior<'a> {
             search_query_active,
             pending_open_nodes: Vec::new(),
             pending_closed_nodes: Vec::new(),
+            pending_graph_intents: Vec::new(),
         }
     }
 
@@ -56,6 +58,10 @@ impl<'a> GraphshellTileBehavior<'a> {
 
     pub fn take_pending_closed_nodes(&mut self) -> Vec<NodeKey> {
         std::mem::take(&mut self.pending_closed_nodes)
+    }
+
+    pub fn take_pending_graph_intents(&mut self) -> Vec<GraphIntent> {
+        std::mem::take(&mut self.pending_graph_intents)
     }
 
     fn hash_favicon(width: u32, height: u32, rgba: &[u8]) -> u64 {
@@ -142,17 +148,18 @@ impl<'a> Behavior<TileKind> for GraphshellTileBehavior<'a> {
                 for action in actions {
                     match action {
                         GraphAction::FocusNode(key) => {
-                            self.graph_app.apply_intents([GraphIntent::SelectNode {
+                            self.pending_graph_intents.push(GraphIntent::SelectNode {
                                 key,
                                 multi_select: false,
-                            }]);
+                            });
                             self.pending_open_nodes.push(key);
                         },
                         other => passthrough_actions.push(other),
                     }
                 }
 
-                render::apply_graph_actions(self.graph_app, passthrough_actions);
+                self.pending_graph_intents
+                    .extend(render::intents_from_graph_actions(passthrough_actions));
                 render::sync_graph_positions_from_layout(self.graph_app);
                 render::render_graph_info_in_ui(ui, self.graph_app);
             },

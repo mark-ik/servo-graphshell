@@ -275,8 +275,8 @@ fn collect_graph_actions(
     actions
 }
 
-/// Apply resolved graph actions to app state (testable without egui rendering).
-pub fn apply_graph_actions(app: &mut GraphBrowserApp, actions: Vec<GraphAction>) {
+/// Convert resolved graph actions to graph intents without applying them.
+pub fn intents_from_graph_actions(actions: Vec<GraphAction>) -> Vec<GraphIntent> {
     let mut intents = Vec::with_capacity(actions.len());
     for action in actions {
         match action {
@@ -307,7 +307,7 @@ pub fn apply_graph_actions(app: &mut GraphBrowserApp, actions: Vec<GraphAction>)
             },
         }
     }
-    app.apply_intents(intents);
+    intents
 }
 
 /// Sync node positions from egui_graphs layout state back into app graph state.
@@ -561,7 +561,8 @@ mod tests {
         let mut app = test_app();
         let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
 
-        apply_graph_actions(&mut app, vec![GraphAction::FocusNode(key)]);
+        let intents = intents_from_graph_actions(vec![GraphAction::FocusNode(key)]);
+        app.apply_intents(intents);
 
         assert!(app.selected_nodes.contains(&key));
     }
@@ -571,7 +572,8 @@ mod tests {
         let mut app = test_app();
         assert!(!app.is_interacting);
 
-        apply_graph_actions(&mut app, vec![GraphAction::DragStart]);
+        let intents = intents_from_graph_actions(vec![GraphAction::DragStart]);
+        app.apply_intents(intents);
 
         assert!(app.is_interacting);
     }
@@ -582,10 +584,11 @@ mod tests {
         let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
         app.set_interacting(true);
 
-        apply_graph_actions(
-            &mut app,
-            vec![GraphAction::DragEnd(key, Point2D::new(150.0, 250.0))],
-        );
+        let intents = intents_from_graph_actions(vec![GraphAction::DragEnd(
+            key,
+            Point2D::new(150.0, 250.0),
+        )]);
+        app.apply_intents(intents);
 
         assert!(!app.is_interacting);
         let node = app.graph.get_node(key).unwrap();
@@ -597,10 +600,9 @@ mod tests {
         let mut app = test_app();
         let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
 
-        apply_graph_actions(
-            &mut app,
-            vec![GraphAction::MoveNode(key, Point2D::new(42.0, 84.0))],
-        );
+        let intents =
+            intents_from_graph_actions(vec![GraphAction::MoveNode(key, Point2D::new(42.0, 84.0))]);
+        app.apply_intents(intents);
 
         let node = app.graph.get_node(key).unwrap();
         assert_eq!(node.position, Point2D::new(42.0, 84.0));
@@ -611,7 +613,8 @@ mod tests {
         let mut app = test_app();
         let key = app.add_node_and_sync("https://example.com".into(), Point2D::new(0.0, 0.0));
 
-        apply_graph_actions(&mut app, vec![GraphAction::SelectNode(key)]);
+        let intents = intents_from_graph_actions(vec![GraphAction::SelectNode(key)]);
+        app.apply_intents(intents);
 
         assert!(app.selected_nodes.contains(&key));
     }
@@ -620,7 +623,8 @@ mod tests {
     fn test_zoom_action_clamps() {
         let mut app = test_app();
 
-        apply_graph_actions(&mut app, vec![GraphAction::Zoom(0.01)]);
+        let intents = intents_from_graph_actions(vec![GraphAction::Zoom(0.01)]);
+        app.apply_intents(intents);
 
         // Should be clamped to min zoom
         assert!(app.camera.current_zoom >= app.camera.zoom_min);
@@ -632,14 +636,12 @@ mod tests {
         let k1 = app.add_node_and_sync("a".into(), Point2D::new(0.0, 0.0));
         let k2 = app.add_node_and_sync("b".into(), Point2D::new(100.0, 100.0));
 
-        apply_graph_actions(
-            &mut app,
-            vec![
-                GraphAction::SelectNode(k1),
-                GraphAction::MoveNode(k2, Point2D::new(200.0, 300.0)),
-                GraphAction::Zoom(1.5),
-            ],
-        );
+        let intents = intents_from_graph_actions(vec![
+            GraphAction::SelectNode(k1),
+            GraphAction::MoveNode(k2, Point2D::new(200.0, 300.0)),
+            GraphAction::Zoom(1.5),
+        ]);
+        app.apply_intents(intents);
 
         assert!(app.selected_nodes.contains(&k1));
         assert_eq!(
@@ -655,7 +657,8 @@ mod tests {
         let key = app.add_node_and_sync("a".into(), Point2D::new(50.0, 60.0));
         let pos_before = app.graph.get_node(key).unwrap().position;
 
-        apply_graph_actions(&mut app, vec![]);
+        let intents = intents_from_graph_actions(vec![]);
+        app.apply_intents(intents);
 
         assert_eq!(app.graph.get_node(key).unwrap().position, pos_before);
     }

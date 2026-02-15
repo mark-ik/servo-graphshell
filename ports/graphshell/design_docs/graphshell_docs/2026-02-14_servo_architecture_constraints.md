@@ -157,6 +157,12 @@ Prefer extending Graphshell-side handling over patching Servo core unless there 
 
 ---
 
+## What Went Wrong (2026-02-15)
+
+The navigation fixes attempted so far did not resolve the behavior because they did not replace polling-driven node creation with delegate-driven updates. `notify_url_changed` remained unused as the authority for same-tab navigation, so `sync_to_graph` continued to interpret URL changes as new nodes. The conclusion is that the delegate callback path must become primary, and polling should be reduced to cleanup only. See NAVIGATION_NEXT_STEPS_OPTIONS.md for the options.
+
+---
+
 ## Research Questions (Unvalidated / Needs Measurement)
 
 1. What is measured `request_create_new` -> first usable paint latency across representative pages/hardware for Graphshell's headed mode?

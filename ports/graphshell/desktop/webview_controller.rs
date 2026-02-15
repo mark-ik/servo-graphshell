@@ -8,14 +8,15 @@
 //! testable functions. All Servo WebView operations (create, close,
 //! sync to graph nodes) live here.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use servo::WebViewId;
+use servo::{OffscreenRenderingContext, RenderingContext, WebViewId, WindowRenderingContext};
 use url::Url;
 
 use crate::app::{GraphBrowserApp, GraphIntent};
 use crate::graph::NodeKey;
+use crate::parser::location_bar_input_to_url;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
 use crate::search::fuzzy_match_node_keys;
 use crate::window::ServoShellWindow;
@@ -24,15 +25,16 @@ fn reconcile_mappings_and_selection(
     app: &mut GraphBrowserApp,
     seen_webviews: &HashSet<WebViewId>,
     active_webview: Option<WebViewId>,
-) {
+) -> Vec<GraphIntent> {
+    let mut intents = Vec::new();
     // Highlight the active tab's node (reuse reducer intent for consistency).
     if let Some(active_wv_id) = active_webview
         && let Some(active_node_key) = app.get_node_for_webview(active_wv_id)
     {
-        app.apply_intents([GraphIntent::SelectNode {
+        intents.push(GraphIntent::SelectNode {
             key: active_node_key,
             multi_select: false,
-        }]);
+        });
     }
 
     // Clean up mappings for webviews that no longer exist.
@@ -45,41 +47,52 @@ fn reconcile_mappings_and_selection(
     for wv_id in old_webviews {
         app.unmap_webview(wv_id);
     }
+    intents
 }
 
-fn apply_graph_view_address_submit(app: &mut GraphBrowserApp, input: &str) -> bool {
+fn intents_for_graph_view_address_submit(
+    app: &GraphBrowserApp,
+    input: &str,
+) -> (bool, Vec<GraphIntent>) {
     let input = input.trim();
     if input.is_empty() {
-        return false;
+        return (false, Vec::new());
     }
 
     if let Some(selected_node) = app.get_single_selected_node() {
-        app.apply_intents([GraphIntent::SetNodeUrl {
-            key: selected_node,
-            new_url: input.to_string(),
-        }]);
+        (
+            true,
+            vec![GraphIntent::SetNodeUrl {
+                key: selected_node,
+                new_url: input.to_string(),
+            }],
+        )
     } else {
-        app.apply_intents([GraphIntent::CreateNodeAtUrl {
-            url: input.to_string(),
-            position: euclid::default::Point2D::new(400.0, 300.0),
-        }]);
+        (
+            true,
+            vec![GraphIntent::CreateNodeAtUrl {
+                url: input.to_string(),
+                position: euclid::default::Point2D::new(400.0, 300.0),
+            }],
+        )
     }
-    true
 }
 
-fn apply_omnibox_node_search(app: &mut GraphBrowserApp, query: &str) -> bool {
+fn intents_for_omnibox_node_search(app: &GraphBrowserApp, query: &str) -> (bool, Vec<GraphIntent>) {
     let query = query.trim();
     if query.is_empty() {
-        return false;
+        return (false, Vec::new());
     }
     if let Some(key) = fuzzy_match_node_keys(&app.graph, query).first().copied() {
-        app.apply_intents([GraphIntent::SelectNode {
-            key,
-            multi_select: false,
-        }]);
-        return true;
+        return (
+            true,
+            vec![GraphIntent::SelectNode {
+                key,
+                multi_select: false,
+            }],
+        );
     }
-    false
+    (false, Vec::new())
 }
 
 /// Manage webview lifecycle based on current view.
@@ -95,7 +108,19 @@ pub(crate) fn manage_lifecycle(
     state: &Option<Rc<RunningAppState>>,
     has_webview_tiles: bool,
     active_webview_node: Option<NodeKey>,
+    base_rendering_context: &Rc<OffscreenRenderingContext>,
+    window_rendering_context: &Rc<WindowRenderingContext>,
+    tile_rendering_contexts: &mut HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
 ) {
+    let mut render_context_for_node = |node_key: NodeKey| {
+        tile_rendering_contexts
+            .entry(node_key)
+            .or_insert_with(|| {
+                Rc::new(window_rendering_context.offscreen_context(base_rendering_context.size()))
+            })
+            .clone()
+    };
+
     if !has_webview_tiles {
         // Only save once when entering graph view (webviews exist but list empty)
         if app.active_webview_nodes.is_empty() && window.webviews().into_iter().next().is_some() {
@@ -131,11 +156,15 @@ pub(crate) fn manage_lifecycle(
                         let url = Url::parse(&node.url)
                             .unwrap_or_else(|_| Url::parse("about:blank").unwrap());
 
-                        let webview = if node_key == active_node {
-                            window.create_and_activate_toplevel_webview(app_state.clone(), url)
-                        } else {
-                            window.create_toplevel_webview(app_state.clone(), url)
-                        };
+                        let render_context = render_context_for_node(node_key);
+                        let webview = window.create_toplevel_webview_with_context(
+                            app_state.clone(),
+                            url,
+                            render_context,
+                        );
+                        if node_key == active_node {
+                            window.activate_webview(webview.id());
+                        }
 
                         app.map_webview_to_node(webview.id(), node_key);
 
@@ -155,7 +184,13 @@ pub(crate) fn manage_lifecycle(
                 let url =
                     Url::parse(&node.url).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
 
-                let webview = window.create_and_activate_toplevel_webview(app_state.clone(), url);
+                let render_context = render_context_for_node(active_node);
+                let webview = window.create_toplevel_webview_with_context(
+                    app_state.clone(),
+                    url,
+                    render_context,
+                );
+                window.activate_webview(webview.id());
 
                 app.map_webview_to_node(webview.id(), active_node);
                 app.promote_node_to_active(active_node);
@@ -172,58 +207,93 @@ pub(crate) fn manage_lifecycle(
 /// This is now structural-reconciliation only (cleanup + active highlight).
 /// Structural graph creation and navigation semantics are handled by Servo
 /// delegate events routed through GraphIntent reducer paths.
-pub(crate) fn sync_to_graph(app: &mut GraphBrowserApp, window: &ServoShellWindow) {
+pub(crate) fn sync_to_graph_intents(
+    app: &mut GraphBrowserApp,
+    window: &ServoShellWindow,
+) -> Vec<GraphIntent> {
     // Track which webviews we've seen (to remove stale mappings later).
     let mut seen_webviews = HashSet::new();
     for (wv_id, _) in window.webviews().into_iter() {
         seen_webviews.insert(wv_id);
     }
     let active = window.webview_collection.borrow().active_id();
-    reconcile_mappings_and_selection(app, &seen_webviews, active);
+    reconcile_mappings_and_selection(app, &seen_webviews, active)
 }
 
-/// Handle address bar submission (Enter key).
-///
-/// - **Graph view**: Update selected node URL in-place, or create a new node.
-/// - **Detail view**: Queue a navigation command.
-///
-/// Returns `true` if the location field should be marked as clean
-/// (graph view submissions always clear dirty state).
 pub(crate) struct AddressBarSubmitOutcome {
     pub mark_clean: bool,
     pub open_selected_tile: bool,
 }
 
-pub(crate) fn handle_address_bar_submit(
-    app: &mut GraphBrowserApp,
+pub(crate) struct AddressBarIntentOutcome {
+    pub outcome: AddressBarSubmitOutcome,
+    pub intents: Vec<GraphIntent>,
+}
+
+pub(crate) fn handle_address_bar_submit_intents(
+    app: &GraphBrowserApp,
     url: &str,
     is_graph_view: bool,
     focused_webview: Option<WebViewId>,
     window: &ServoShellWindow,
-) -> AddressBarSubmitOutcome {
+    searchpage: &str,
+) -> AddressBarIntentOutcome {
     let input = url.trim();
     if let Some(query) = input.strip_prefix('@') {
-        let _ = apply_omnibox_node_search(app, query);
-        return AddressBarSubmitOutcome {
-            mark_clean: true,
-            open_selected_tile: false,
+        let (_handled, intents) = intents_for_omnibox_node_search(app, query);
+        return AddressBarIntentOutcome {
+            outcome: AddressBarSubmitOutcome {
+                mark_clean: true,
+                open_selected_tile: false,
+            },
+            intents,
         };
     }
 
     if is_graph_view {
-        let open_selected_tile = apply_graph_view_address_submit(app, input);
-        AddressBarSubmitOutcome {
-            mark_clean: true,
-            open_selected_tile,
+        let (open_selected_tile, intents) = intents_for_graph_view_address_submit(app, input);
+        AddressBarIntentOutcome {
+            outcome: AddressBarSubmitOutcome {
+                mark_clean: true,
+                open_selected_tile,
+            },
+            intents,
         }
     } else {
-        if let Some(webview_id) = focused_webview {
-            window.activate_webview(webview_id);
+        // PHASE 0 PROOF: Direct webview targeting instead of command queue
+        // Parse URL first before attempting to navigate
+        let Some(parsed_url) = location_bar_input_to_url(input, searchpage) else {
+            log::warn!("Failed to parse location: {}", input);
+            return AddressBarIntentOutcome {
+                outcome: AddressBarSubmitOutcome {
+                    mark_clean: false,
+                    open_selected_tile: false,
+                },
+                intents: Vec::new(),
+            };
+        };
+
+        if let Some(webview_id) = focused_webview
+            && let Some(webview) = window.webview_by_id(webview_id)
+        {
+            webview.load(parsed_url.into_url());
+            window.set_needs_update();
+            return AddressBarIntentOutcome {
+                outcome: AddressBarSubmitOutcome {
+                    mark_clean: false,
+                    open_selected_tile: false,
+                },
+                intents: Vec::new(),
+            };
         }
+
         window.queue_user_interface_command(UserInterfaceCommand::Go(input.to_string()));
-        AddressBarSubmitOutcome {
-            mark_clean: false,
-            open_selected_tile: false,
+        AddressBarIntentOutcome {
+            outcome: AddressBarSubmitOutcome {
+                mark_clean: false,
+                open_selected_tile: false,
+            },
+            intents: Vec::new(),
         }
     }
 }
@@ -289,7 +359,8 @@ mod tests {
 
         let mut seen = HashSet::new();
         seen.insert(w1);
-        reconcile_mappings_and_selection(&mut app, &seen, Some(w1));
+        let intents = reconcile_mappings_and_selection(&mut app, &seen, Some(w1));
+        app.apply_intents(intents);
 
         assert_eq!(app.get_node_for_webview(w1), Some(n1));
         assert_eq!(app.get_node_for_webview(w2), None);
@@ -304,7 +375,9 @@ mod tests {
             .add_node("https://old.com".into(), Point2D::new(0.0, 0.0));
         app.select_node(key, false);
 
-        let open_selected_tile = apply_graph_view_address_submit(&mut app, "https://new.com");
+        let (open_selected_tile, intents) =
+            intents_for_graph_view_address_submit(&app, "https://new.com");
+        app.apply_intents(intents);
 
         let node = app.graph.get_node(key).unwrap();
         assert_eq!(node.url, "https://new.com");
@@ -316,7 +389,9 @@ mod tests {
         let mut app = GraphBrowserApp::new_for_testing();
         let before = app.graph.node_count();
 
-        let open_selected_tile = apply_graph_view_address_submit(&mut app, "https://created.com");
+        let (open_selected_tile, intents) =
+            intents_for_graph_view_address_submit(&app, "https://created.com");
+        app.apply_intents(intents);
 
         assert_eq!(app.graph.node_count(), before + 1);
         let selected = app.get_single_selected_node().unwrap();
@@ -338,10 +413,11 @@ mod tests {
         }
         let original_url = app.graph.get_node(key).unwrap().url.clone();
 
-        let open_selected_tile = apply_graph_view_address_submit(&mut app, "@example handle");
+        let (open_selected_tile, intents) = intents_for_omnibox_node_search(&app, "example handle");
+        app.apply_intents(intents);
 
         assert_eq!(app.get_single_selected_node(), Some(key));
         assert_eq!(app.graph.get_node(key).unwrap().url, original_url);
-        assert!(!open_selected_tile);
+        assert!(open_selected_tile);
     }
 }

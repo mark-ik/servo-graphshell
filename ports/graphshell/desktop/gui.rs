@@ -488,14 +488,21 @@ impl Gui {
 
         let winit_window = headed_window.winit_window();
         context.run(winit_window, |ctx| {
-            load_pending_thumbnail_results(
+            let mut frame_intents = Vec::new();
+            let mut pending_open_child_webviews = Vec::new();
+            let mut open_selected_tile_after_intents = false;
+
+            frame_intents.extend(load_pending_thumbnail_results(
                 graph_app,
                 window,
                 thumbnail_capture_rx,
                 thumbnail_capture_in_flight,
-            );
-            apply_pending_graph_semantic_events(graph_app, window, tiles_tree);
-            load_pending_favicons(ctx, window, graph_app, favicon_textures);
+            ));
+            let (semantic_intents, created_children) =
+                graph_intents_from_pending_semantic_events(window);
+            frame_intents.extend(semantic_intents);
+            pending_open_child_webviews.extend(created_children);
+            frame_intents.extend(load_pending_favicons(ctx, window, graph_app, favicon_textures));
             request_pending_thumbnail_captures(
                 graph_app,
                 window,
@@ -562,10 +569,10 @@ impl Gui {
                         *graph_search_active_match_index,
                     )
                 {
-                    graph_app.apply_intents([GraphIntent::SelectNode {
+                    frame_intents.push(GraphIntent::SelectNode {
                         key: node_key,
                         multi_select: false,
-                    }]);
+                    });
                 }
                 if ctx.input(|i| i.key_pressed(Key::Escape)) {
                     suppress_toggle_view = true;
@@ -615,7 +622,7 @@ impl Gui {
                     favicon_textures,
                 );
             }
-            input::apply_actions(graph_app, &keyboard_actions);
+            frame_intents.extend(input::intents_from_actions(&keyboard_actions));
 
             // If graph was cleared (no nodes), reset tracking state
             if graph_app.graph.node_count() == 0 {
@@ -635,7 +642,7 @@ impl Gui {
             // Check which view mode we're in (used throughout rendering)
             let active_webview_node = Self::active_webview_tile_node(tiles_tree);
             let has_webview_tiles = Self::has_any_webview_tiles_in(tiles_tree);
-            let is_graph_view = active_webview_node.is_none();
+            let is_graph_view = !has_webview_tiles;
             let should_sync_webviews = has_webview_tiles;
 
             // Webview lifecycle management (create/destroy based on view)
@@ -645,11 +652,14 @@ impl Gui {
                 app_state,
                 has_webview_tiles,
                 active_webview_node,
+                rendering_context,
+                window_rendering_context,
+                tile_rendering_contexts,
             );
 
             // Sync webviews to graph nodes (only in detail view — graph view has no webviews)
             if should_sync_webviews {
-                webview_controller::sync_to_graph(graph_app, window);
+                frame_intents.extend(webview_controller::sync_to_graph_intents(graph_app, window));
 
                 // Keep WebView/context mappings complete for all tile nodes (not only visible ones).
                 for node_key in Self::all_webview_tile_nodes(tiles_tree) {
@@ -696,7 +706,13 @@ impl Gui {
                             });
                             if back_button.clicked() {
                                 *location_dirty = false;
-                                window.queue_user_interface_command(UserInterfaceCommand::Back);
+                                if let Some(node_key) = active_webview_node
+                                    && let Some(webview_id) = graph_app.get_webview_for_node(node_key)
+                                    && let Some(webview) = window.webview_by_id(webview_id)
+                                {
+                                    webview.go_back(1);
+                                    window.set_needs_update();
+                                }
                             }
 
                             let forward_button =
@@ -708,7 +724,13 @@ impl Gui {
                             });
                             if forward_button.clicked() {
                                 *location_dirty = false;
-                                window.queue_user_interface_command(UserInterfaceCommand::Forward);
+                                if let Some(node_key) = active_webview_node
+                                    && let Some(webview_id) = graph_app.get_webview_for_node(node_key)
+                                    && let Some(webview) = window.webview_by_id(webview_id)
+                                {
+                                    webview.go_forward(1);
+                                    window.set_needs_update();
+                                }
                             }
 
                             match self.load_status {
@@ -732,9 +754,15 @@ impl Gui {
                                     });
                                     if reload_button.clicked() {
                                         *location_dirty = false;
-                                        window.queue_user_interface_command(
-                                            UserInterfaceCommand::Reload,
-                                        );
+                                        if let Some(node_key) = active_webview_node
+                                            && let Some(webview_id) =
+                                                graph_app.get_webview_for_node(node_key)
+                                            && let Some(webview) =
+                                                window.webview_by_id(webview_id)
+                                        {
+                                            webview.reload();
+                                            window.set_needs_update();
+                                        }
                                     }
                                 },
                             }
@@ -832,15 +860,14 @@ impl Gui {
                                         .add(Gui::toolbar_button("Phys"))
                                         .on_hover_text("Show/hide physics settings panel");
                                     if physics_button.clicked() {
-                                        graph_app
-                                            .apply_intents([GraphIntent::TogglePhysicsPanel]);
+                                        frame_intents.push(GraphIntent::TogglePhysicsPanel);
                                     }
 
                                     let new_node_button = ui
                                         .add(Gui::toolbar_button("Node+"))
                                         .on_hover_text("Create a new graph node");
                                     if new_node_button.clicked() {
-                                        graph_app.apply_intents([GraphIntent::CreateNodeNearCenter]);
+                                        frame_intents.push(GraphIntent::CreateNodeNearCenter);
                                     }
                                     let new_tab_button = ui
                                         .add(Gui::toolbar_button("Tab+"))
@@ -848,8 +875,8 @@ impl Gui {
                                             "Create a new node and open it as a tab in this graph window",
                                         );
                                     if new_tab_button.clicked() {
-                                        let node_key = graph_app.create_new_node_near_center();
-                                        Self::open_or_focus_webview_tile(tiles_tree, node_key);
+                                        frame_intents.push(GraphIntent::CreateNodeNearCenter);
+                                        open_selected_tile_after_intents = true;
                                     }
 
                                     let location_id = egui::Id::new("location_input");
@@ -900,28 +927,23 @@ impl Gui {
                                         || (*location_submitted && location_field.lost_focus());
                                     if should_submit_now {
                                         *location_submitted = false;
-                                        let submit_outcome =
-                                            webview_controller::handle_address_bar_submit(
-                                            graph_app,
-                                            location,
-                                            is_graph_view,
-                                            Self::active_webview_tile_node(tiles_tree)
-                                                .and_then(|key| {
-                                                    graph_app.get_webview_for_node(key)
-                                                }),
-                                            window,
-                                        );
+                                        let focused_webview_id = active_webview_node
+                                            .and_then(|key| graph_app.get_webview_for_node(key));
+                                        let submit_result =
+                                            webview_controller::handle_address_bar_submit_intents(
+                                                graph_app,
+                                                location,
+                                                is_graph_view,
+                                                focused_webview_id,
+                                                window,
+                                                &state.servoshell_preferences.searchpage,
+                                            );
+                                        frame_intents.extend(submit_result.intents);
+                                        let submit_outcome = submit_result.outcome;
                                         if submit_outcome.mark_clean {
                                             *location_dirty = false;
-                                            if is_graph_view
-                                                && submit_outcome.open_selected_tile
-                                                && let Some(node_key) =
-                                                    graph_app.get_single_selected_node()
-                                            {
-                                                Self::open_or_focus_webview_tile(
-                                                    tiles_tree, node_key,
-                                                );
-                                            }
+                                            open_selected_tile_after_intents = is_graph_view
+                                                && submit_outcome.open_selected_tile;
                                         }
                                     }
                                 },
@@ -1157,6 +1179,7 @@ impl Gui {
                         tiles_tree.ui(&mut behavior, ui);
                         pending_open_nodes.extend(behavior.take_pending_open_nodes());
                         pending_closed_nodes.extend(behavior.take_pending_closed_nodes());
+                        frame_intents.extend(behavior.take_pending_graph_intents());
                     });
                 for node_key in pending_open_nodes {
                     Self::open_or_focus_webview_tile(tiles_tree, node_key);
@@ -1302,6 +1325,30 @@ impl Gui {
                         })),
                     });
                 }
+            }
+
+            if !frame_intents.is_empty() {
+                graph_app.apply_intents(frame_intents);
+            }
+
+            if open_selected_tile_after_intents
+                && let Some(node_key) = graph_app.get_single_selected_node()
+            {
+                Self::open_or_focus_webview_tile(tiles_tree, node_key);
+            }
+            for child_webview_id in pending_open_child_webviews {
+                if let Some(node_key) = graph_app.get_node_for_webview(child_webview_id) {
+                    Self::open_or_focus_webview_tile(tiles_tree, node_key);
+                }
+            }
+            if graph_app.graph.node_count() == 0 {
+                graph_app.active_webview_nodes.clear();
+                Self::reset_runtime_webview_state(
+                    tiles_tree,
+                    tile_rendering_contexts,
+                    tile_favicon_textures,
+                    favicon_textures,
+                );
             }
 
             // Render floating panels (available in both views)
@@ -1565,7 +1612,7 @@ impl Gui {
         }
 
         // In graph context, show the selected node URL.
-        if !self.has_active_webview_tile() {
+        if !Self::has_any_webview_tiles_in(&self.tiles_tree) {
             if let Some(key) = self.graph_app.get_single_selected_node() {
                 if let Some(node) = self.graph_app.graph.get_node(key) {
                     if node.url != self.location {
@@ -2096,28 +2143,27 @@ fn graph_intents_from_semantic_events(events: Vec<GraphSemanticEvent>) -> Vec<Gr
     intents
 }
 
-fn apply_pending_graph_semantic_events(
-    graph_app: &mut GraphBrowserApp,
+fn graph_intents_from_pending_semantic_events(
     window: &ServoShellWindow,
-    tiles_tree: &mut Tree<TileKind>,
-) {
+) -> (Vec<GraphIntent>, Vec<WebViewId>) {
     let events = window.take_pending_graph_events();
-    let created_child_webviews: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            GraphSemanticEvent::CreateNewWebView {
-                child_webview_id, ..
-            } => Some(*child_webview_id),
-            _ => None,
-        })
-        .collect();
-    let intents = graph_intents_from_semantic_events(events);
-    graph_app.apply_intents(intents);
-    for child_webview_id in created_child_webviews {
-        if let Some(node_key) = graph_app.get_node_for_webview(child_webview_id) {
-            Gui::open_or_focus_webview_tile(tiles_tree, node_key);
+    let mut create_events = Vec::new();
+    let mut other_events = Vec::new();
+    let mut created_child_webviews = Vec::new();
+
+    for event in events {
+        match &event {
+            GraphSemanticEvent::CreateNewWebView { child_webview_id, .. } => {
+                created_child_webviews.push(*child_webview_id);
+                create_events.push(event);
+            }
+            _ => other_events.push(event),
         }
     }
+
+    let mut intents = graph_intents_from_semantic_events(create_events);
+    intents.extend(graph_intents_from_semantic_events(other_events));
+    (intents, created_child_webviews)
 }
 
 fn refresh_graph_search_matches(
@@ -2241,19 +2287,21 @@ fn request_pending_thumbnail_captures(
 }
 
 fn load_pending_thumbnail_results(
-    graph_app: &mut GraphBrowserApp,
+    graph_app: &GraphBrowserApp,
     window: &ServoShellWindow,
     result_rx: &Receiver<ThumbnailCaptureResult>,
     in_flight: &mut HashSet<WebViewId>,
-) {
+) -> Vec<GraphIntent> {
     in_flight.retain(|id| window.contains_webview(*id));
+    let mut intents = Vec::new();
 
     while let Ok(result) = result_rx.try_recv() {
         in_flight.remove(&result.webview_id);
         if let Some(intent) = graph_intent_for_thumbnail_result(graph_app, &result) {
-            graph_app.apply_intents([intent]);
+            intents.push(intent);
         }
     }
+    intents
 }
 
 fn graph_intent_for_thumbnail_result(
@@ -2312,9 +2360,10 @@ fn embedder_image_to_rgba(image: &Image) -> (usize, usize, Vec<u8>) {
 fn load_pending_favicons(
     ctx: &egui::Context,
     window: &ServoShellWindow,
-    graph_app: &mut GraphBrowserApp,
+    graph_app: &GraphBrowserApp,
     texture_cache: &mut HashMap<WebViewId, (egui::TextureHandle, egui::load::SizedTexture)>,
-) {
+) -> Vec<GraphIntent> {
+    let mut intents = Vec::new();
     for id in window.take_pending_favicon_loads() {
         let Some(webview) = window.webview_by_id(id) else {
             continue;
@@ -2336,12 +2385,13 @@ fn load_pending_favicons(
         texture_cache.insert(id, (handle, texture));
 
         if let Some(node_key) = graph_app.get_node_for_webview(id) {
-            graph_app.apply_intents([GraphIntent::SetNodeFavicon {
+            intents.push(GraphIntent::SetNodeFavicon {
                 key: node_key,
                 rgba,
                 width: width as u32,
                 height: height as u32,
-            }]);
+            });
         }
     }
+    intents
 }
