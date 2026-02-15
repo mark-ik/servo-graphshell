@@ -27,3 +27,9 @@
 
 ## Progress
 - 2026-02-11: Plan created.
+- 2026-02-14: Landed FT6 implementation:
+  - Added graph search UI toggle (`Ctrl+F`) with clear-on-`Esc`.
+  - Added fuzzy URL/title matching using `nucleo`.
+  - Added highlight and filter mode integration in graph rendering.
+  - Added result navigation (`Up/Down`) and active-result select (`Enter`).
+  - Added unit coverage for matcher behavior and search-state helpers.

@@ -662,10 +662,6 @@ impl HeadedWindow {
                 }
                 consumed = response.consumed;
             },
-            WindowEvent::KeyboardInput { .. } if !self.gui.borrow().has_keyboard_focus() => {
-                // Other keyboard events should go to the WebView unless some other GUI
-                // component has keyboard focus.
-            },
             ref event => {
                 let response = self
                     .gui

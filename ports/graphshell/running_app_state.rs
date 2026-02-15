@@ -152,9 +152,6 @@ pub(crate) enum UserInterfaceCommand {
     Forward,
     Reload,
     ReloadAll,
-    NewWebView,
-    CloseWebView(WebViewId),
-    NewWindow,
 }
 
 pub(crate) struct RunningAppState {

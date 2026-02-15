@@ -34,7 +34,7 @@
 5. **[IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md)** (30 min)
    - Feature-driven plan (11 feature targets)
    - egui_tiles migration complete
-   - Next block: physics/selection simplification, then FT2 thumbnails
+   - Next block: post-FT2/FT6 hardening (selection semantics + follow-on polish)
    - Validation tests and success criteria for each target
 
 6. **[2026-02-14_no_legacy_development_policy.md](2026-02-14_no_legacy_development_policy.md)** (5 min)
@@ -133,9 +133,9 @@
 ## Status Snapshot
 
 - **Core browsing graph functional** (~7,000 LOC total, ~1,300 core graph+physics). Details in [ARCHITECTURAL_OVERVIEW.md](ARCHITECTURAL_OVERVIEW.md).
-- **Phase 1 progress**: egui_tiles migration complete; favicon vertical slice complete; thumbnail pipeline still pending.
+- **Phase 1 progress**: egui_tiles migration complete; FT2 thumbnail/fallback pipeline complete; FT6 search/filter complete.
 - **Refinement**: 11/11 steps complete. See [phase1_refinement_plan.md](implementation_strategy/2026-02-11_phase1_refinement_plan.md).
-- **Tests**: 155 passing
+- **Tests**: 161 passing
 - **Tech stack**: petgraph + egui_graphs + kiddo + fjall + redb + rkyv. Details in [IMPLEMENTATION_ROADMAP.md](IMPLEMENTATION_ROADMAP.md).
 
 ---

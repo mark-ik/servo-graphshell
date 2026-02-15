@@ -47,3 +47,9 @@
 - 2026-02-12: Sequencing updated:
   - Physics migration and selection consolidation are the immediate predecessor tasks.
   - Next FT2 slice starts with thumbnail byte pipeline (`capture -> resize -> persist -> render`).
+- 2026-02-14: Landed FT2 thumbnail completion:
+  - Added load-complete-triggered thumbnail capture requests via window semantic queue.
+  - Added asynchronous screenshot -> resize (256x192) -> PNG pipeline.
+  - Added stale-result rejection by webview URL match before reducer apply.
+  - Persisted thumbnail bytes in snapshot schema and rendered with thumbnail > favicon > color fallback.
+  - Added tests for thumbnail intent mapping and stale/empty capture rejection.

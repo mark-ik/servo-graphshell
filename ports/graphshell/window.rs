@@ -402,7 +402,7 @@ impl ServoShellWindow {
     pub(crate) fn handle_interface_commands(
         &self,
         state: &Rc<RunningAppState>,
-        create_platform_window: Option<&dyn Fn(Url) -> Rc<dyn PlatformWindow>>,
+        _create_platform_window: Option<&dyn Fn(Url) -> Rc<dyn PlatformWindow>>,
     ) {
         let commands = std::mem::take(&mut *self.pending_commands.borrow_mut());
         for event in commands {
@@ -442,22 +442,6 @@ impl ServoShellWindow {
                         for (_, webview) in window.webviews() {
                             webview.reload();
                         }
-                    }
-                },
-                UserInterfaceCommand::NewWebView => {
-                    self.set_needs_update();
-                    let url = Url::parse("servo:newtab").expect("Should always be able to parse");
-                    self.create_and_activate_toplevel_webview(state.clone(), url);
-                },
-                UserInterfaceCommand::CloseWebView(id) => {
-                    self.set_needs_update();
-                    self.close_webview(id);
-                },
-                UserInterfaceCommand::NewWindow => {
-                    if let Some(create_platform_window) = create_platform_window {
-                        let url = Url::parse("servo:newtab").unwrap();
-                        let platform_window = create_platform_window(url.clone());
-                        state.open_window(platform_window, url);
                     }
                 },
             }

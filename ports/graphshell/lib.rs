@@ -13,6 +13,7 @@ mod graph;
 mod input;
 mod persistence;
 mod render;
+mod search;
 mod util;
 
 #[cfg(not(target_os = "android"))]

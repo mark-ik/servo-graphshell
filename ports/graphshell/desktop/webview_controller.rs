@@ -17,6 +17,7 @@ use url::Url;
 use crate::app::{GraphBrowserApp, GraphIntent};
 use crate::graph::NodeKey;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
+use crate::search::fuzzy_match_node_keys;
 use crate::window::ServoShellWindow;
 
 fn reconcile_mappings_and_selection(
@@ -46,18 +47,39 @@ fn reconcile_mappings_and_selection(
     }
 }
 
-fn apply_graph_view_address_submit(app: &mut GraphBrowserApp, url: &str) {
+fn apply_graph_view_address_submit(app: &mut GraphBrowserApp, input: &str) -> bool {
+    let input = input.trim();
+    if input.is_empty() {
+        return false;
+    }
+
     if let Some(selected_node) = app.get_single_selected_node() {
         app.apply_intents([GraphIntent::SetNodeUrl {
             key: selected_node,
-            new_url: url.to_string(),
+            new_url: input.to_string(),
         }]);
     } else {
         app.apply_intents([GraphIntent::CreateNodeAtUrl {
-            url: url.to_string(),
+            url: input.to_string(),
             position: euclid::default::Point2D::new(400.0, 300.0),
         }]);
     }
+    true
+}
+
+fn apply_omnibox_node_search(app: &mut GraphBrowserApp, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return false;
+    }
+    if let Some(key) = fuzzy_match_node_keys(&app.graph, query).first().copied() {
+        app.apply_intents([GraphIntent::SelectNode {
+            key,
+            multi_select: false,
+        }]);
+        return true;
+    }
+    false
 }
 
 /// Manage webview lifecycle based on current view.
@@ -167,18 +189,42 @@ pub(crate) fn sync_to_graph(app: &mut GraphBrowserApp, window: &ServoShellWindow
 ///
 /// Returns `true` if the location field should be marked as clean
 /// (graph view submissions always clear dirty state).
+pub(crate) struct AddressBarSubmitOutcome {
+    pub mark_clean: bool,
+    pub open_selected_tile: bool,
+}
+
 pub(crate) fn handle_address_bar_submit(
     app: &mut GraphBrowserApp,
     url: &str,
     is_graph_view: bool,
+    focused_webview: Option<WebViewId>,
     window: &ServoShellWindow,
-) -> bool {
+) -> AddressBarSubmitOutcome {
+    let input = url.trim();
+    if let Some(query) = input.strip_prefix('@') {
+        let _ = apply_omnibox_node_search(app, query);
+        return AddressBarSubmitOutcome {
+            mark_clean: true,
+            open_selected_tile: false,
+        };
+    }
+
     if is_graph_view {
-        apply_graph_view_address_submit(app, url);
-        true
+        let open_selected_tile = apply_graph_view_address_submit(app, input);
+        AddressBarSubmitOutcome {
+            mark_clean: true,
+            open_selected_tile,
+        }
     } else {
-        window.queue_user_interface_command(UserInterfaceCommand::Go(url.to_string()));
-        false
+        if let Some(webview_id) = focused_webview {
+            window.activate_webview(webview_id);
+        }
+        window.queue_user_interface_command(UserInterfaceCommand::Go(input.to_string()));
+        AddressBarSubmitOutcome {
+            mark_clean: false,
+            open_selected_tile: false,
+        }
     }
 }
 
@@ -258,10 +304,11 @@ mod tests {
             .add_node("https://old.com".into(), Point2D::new(0.0, 0.0));
         app.select_node(key, false);
 
-        apply_graph_view_address_submit(&mut app, "https://new.com");
+        let open_selected_tile = apply_graph_view_address_submit(&mut app, "https://new.com");
 
         let node = app.graph.get_node(key).unwrap();
         assert_eq!(node.url, "https://new.com");
+        assert!(open_selected_tile);
     }
 
     #[test]
@@ -269,7 +316,7 @@ mod tests {
         let mut app = GraphBrowserApp::new_for_testing();
         let before = app.graph.node_count();
 
-        apply_graph_view_address_submit(&mut app, "https://created.com");
+        let open_selected_tile = apply_graph_view_address_submit(&mut app, "https://created.com");
 
         assert_eq!(app.graph.node_count(), before + 1);
         let selected = app.get_single_selected_node().unwrap();
@@ -277,5 +324,24 @@ mod tests {
             app.graph.get_node(selected).unwrap().url,
             "https://created.com"
         );
+        assert!(open_selected_tile);
+    }
+
+    #[test]
+    fn test_apply_graph_view_submit_handle_search_selects_without_navigation() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let key = app
+            .graph
+            .add_node("https://example.com".into(), Point2D::new(0.0, 0.0));
+        if let Some(node) = app.graph.get_node_mut(key) {
+            node.title = "Example Handle".into();
+        }
+        let original_url = app.graph.get_node(key).unwrap().url.clone();
+
+        let open_selected_tile = apply_graph_view_address_submit(&mut app, "@example handle");
+
+        assert_eq!(app.get_single_selected_node(), Some(key));
+        assert_eq!(app.graph.get_node(key).unwrap().url, original_url);
+        assert!(!open_selected_tile);
     }
 }

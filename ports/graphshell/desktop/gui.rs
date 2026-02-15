@@ -13,8 +13,8 @@ use dpi::PhysicalSize;
 use egui::text::{CCursor, CCursorRange};
 use egui::text_edit::TextEditState;
 use egui::{
-    Button, Key, Label, LayerId, Modifiers, PaintCallback, TopBottomPanel, Vec2, WidgetInfo,
-    WidgetType, pos2,
+    Key, Label, LayerId, Modifiers, PaintCallback, TopBottomPanel, Vec2, WidgetInfo, WidgetType,
+    pos2,
 };
 use egui_glow::{CallbackFn, EguiGlow};
 use egui_tiles::{Container, Tile, Tiles, Tree};
@@ -25,7 +25,7 @@ use image::{DynamicImage, ImageFormat};
 use log::warn;
 use servo::{
     DeviceIndependentPixel, DevicePixel, Image, LoadStatus, OffscreenRenderingContext, PixelFormat,
-    RenderingContext, WebView, WebViewId, WindowRenderingContext,
+    RenderingContext, WebViewId, WindowRenderingContext,
 };
 use url::Url;
 use winit::event::WindowEvent;
@@ -42,6 +42,7 @@ use crate::graph::NodeKey;
 use crate::input;
 use crate::render;
 use crate::running_app_state::{RunningAppState, UserInterfaceCommand};
+use crate::search::fuzzy_match_node_keys;
 use crate::window::{GraphSemanticEvent, ServoShellWindow};
 
 /// The user interface of a headed servoshell. Currently this is implemented via
@@ -118,11 +119,24 @@ pub struct Gui {
     /// WebViews with an in-flight thumbnail request.
     thumbnail_capture_in_flight: HashSet<WebViewId>,
 
+    /// Whether the graph search UI is visible.
+    graph_search_open: bool,
+
+    /// Current graph search query text.
+    graph_search_query: String,
+
+    /// Search mode: hide non-matching nodes when enabled.
+    graph_search_filter_mode: bool,
+
+    /// Ranked node matches for the current search query.
+    graph_search_matches: Vec<NodeKey>,
+
+    /// Active result index in `graph_search_matches`.
+    graph_search_active_match_index: Option<usize>,
+
     /// Cached reference to RunningAppState for webview creation
     state: Option<Rc<RunningAppState>>,
 }
-
-use crate::util::truncate_with_ellipsis;
 
 impl Drop for Gui {
     fn drop(&mut self) {
@@ -235,6 +249,11 @@ impl Gui {
             thumbnail_capture_tx,
             thumbnail_capture_rx,
             thumbnail_capture_in_flight: HashSet::new(),
+            graph_search_open: false,
+            graph_search_query: String::new(),
+            graph_search_filter_mode: false,
+            graph_search_matches: Vec::new(),
+            graph_search_active_match_index: None,
             state: None,
         }
     }
@@ -283,6 +302,14 @@ impl Gui {
         Ok(())
     }
 
+    fn parse_data_dir_input(raw: &str) -> Option<PathBuf> {
+        let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(trimmed))
+    }
+
     fn reset_runtime_webview_state(
         tiles_tree: &mut Tree<TileKind>,
         tile_rendering_contexts: &mut HashMap<NodeKey, Rc<OffscreenRenderingContext>>,
@@ -325,14 +352,8 @@ impl Gui {
         violations
     }
 
-    pub(crate) fn has_keyboard_focus(&self) -> bool {
-        self.context
-            .egui_ctx
-            .memory(|memory| memory.focused().is_some())
-    }
-
     pub(crate) fn is_graph_view(&self) -> bool {
-        !self.has_any_webview_tiles()
+        !self.has_active_webview_tile()
     }
 
     /// Set the RunningAppState reference for webview creation
@@ -355,9 +376,9 @@ impl Gui {
     ) -> EventResponse {
         let mut response = self.context.on_window_event(winit_window, event);
 
-        // In graph view, consume user input events so they never reach a hidden WebView.
-        // If a WebView tile is active, allow events through for that pane.
-        if self.is_graph_view() && !self.has_active_webview_tile() {
+        // When no WebView tile is active, consume user input events so they
+        // never reach an inactive/hidden WebView.
+        if !self.has_active_webview_tile() {
             match event {
                 WindowEvent::KeyboardInput { .. }
                 | WindowEvent::ModifiersChanged(_)
@@ -419,92 +440,6 @@ impl Gui {
             .min_size(Vec2 { x: 20.0, y: 20.0 })
     }
 
-    /// Draws a browser tab, checking for clicks and queues appropriate [`UserInterfaceCommand`]s.
-    /// Using a custom widget here would've been nice, but it doesn't seem as though egui
-    /// supports that, so we arrange multiple Widgets in a way that they look connected.
-    fn browser_tab(
-        ui: &mut egui::Ui,
-        window: &ServoShellWindow,
-        webview: WebView,
-        favicon_texture: Option<egui::load::SizedTexture>,
-    ) {
-        let label = match (webview.page_title(), webview.url()) {
-            (Some(title), _) if !title.is_empty() => title,
-            (_, Some(url)) => url.to_string(),
-            _ => "New Tab".into(),
-        };
-
-        let inactive_bg_color = ui.visuals().window_fill;
-        let active_bg_color = ui.visuals().widgets.active.weak_bg_fill;
-        let active = window.active_webview().map(|webview| webview.id()) == Some(webview.id());
-
-        // Setup a tab frame that will contain the favicon, title and close button
-        let mut tab_frame = egui::Frame::NONE.corner_radius(4).begin(ui);
-        {
-            tab_frame.content_ui.add_space(5.0);
-
-            let visuals = tab_frame.content_ui.visuals_mut();
-            // Remove the stroke so we don't see the border between the close button and the label
-            visuals.widgets.active.bg_stroke.width = 0.0;
-            visuals.widgets.hovered.bg_stroke.width = 0.0;
-            // Now we make sure the fill color is always the same, irrespective of state, that way
-            // we can make sure that both the label and close button have the same background color
-            visuals.widgets.noninteractive.weak_bg_fill = inactive_bg_color;
-            visuals.widgets.inactive.weak_bg_fill = inactive_bg_color;
-            visuals.widgets.hovered.weak_bg_fill = active_bg_color;
-            visuals.widgets.active.weak_bg_fill = active_bg_color;
-            visuals.selection.bg_fill = active_bg_color;
-            visuals.selection.stroke.color = visuals.widgets.active.fg_stroke.color;
-            visuals.widgets.hovered.fg_stroke.color = visuals.widgets.active.fg_stroke.color;
-
-            // Expansion would also show that they are 2 separate widgets
-            visuals.widgets.active.expansion = 0.0;
-            visuals.widgets.hovered.expansion = 0.0;
-
-            if let Some(favicon) = favicon_texture {
-                tab_frame.content_ui.add(
-                    egui::Image::from_texture(favicon)
-                        .fit_to_exact_size(egui::vec2(16.0, 16.0))
-                        .bg_fill(egui::Color32::TRANSPARENT),
-                );
-            }
-
-            let tab = tab_frame
-                .content_ui
-                .add(Button::selectable(
-                    active,
-                    truncate_with_ellipsis(&label, 20),
-                ))
-                .on_hover_ui(|ui| {
-                    ui.label(&label);
-                });
-
-            let close_button = tab_frame
-                .content_ui
-                .add(egui::Button::new("X").fill(egui::Color32::TRANSPARENT));
-            close_button.widget_info(|| {
-                let mut info = WidgetInfo::new(WidgetType::Button);
-                info.label = Some("Close".into());
-                info
-            });
-            if close_button.clicked() || close_button.middle_clicked() || tab.middle_clicked() {
-                window
-                    .queue_user_interface_command(UserInterfaceCommand::CloseWebView(webview.id()));
-            } else if !active && tab.clicked() {
-                window.activate_webview(webview.id());
-            }
-        }
-
-        let response = tab_frame.allocate_space(ui);
-        let fill_color = if active || response.hovered() {
-            active_bg_color
-        } else {
-            inactive_bg_color
-        };
-        tab_frame.frame.fill = fill_color;
-        tab_frame.end(ui);
-    }
-
     /// Update the user interface, but do not paint the updated state.
     pub(crate) fn update(
         &mut self,
@@ -542,6 +477,11 @@ impl Gui {
             thumbnail_capture_tx,
             thumbnail_capture_rx,
             thumbnail_capture_in_flight,
+            graph_search_open,
+            graph_search_query,
+            graph_search_filter_mode,
+            graph_search_matches,
+            graph_search_active_match_index,
             state: app_state,
             ..
         } = self;
@@ -554,7 +494,7 @@ impl Gui {
                 thumbnail_capture_rx,
                 thumbnail_capture_in_flight,
             );
-            apply_pending_graph_semantic_events(graph_app, window);
+            apply_pending_graph_semantic_events(graph_app, window, tiles_tree);
             load_pending_favicons(ctx, window, graph_app, favicon_textures);
             request_pending_thumbnail_captures(
                 graph_app,
@@ -563,8 +503,93 @@ impl Gui {
                 thumbnail_capture_in_flight,
             );
 
+            let graph_search_available = Self::active_webview_tile_node(tiles_tree).is_none();
+            if !graph_search_available && *graph_search_open {
+                *graph_search_open = false;
+                graph_search_query.clear();
+                graph_search_matches.clear();
+                *graph_search_active_match_index = None;
+                *graph_search_filter_mode = false;
+                graph_app.egui_state_dirty = true;
+            }
+
+            let search_shortcut_pressed = ctx.input(|i| {
+                if cfg!(target_os = "macos") {
+                    i.modifiers.command && i.key_pressed(Key::F)
+                } else {
+                    i.modifiers.ctrl && i.key_pressed(Key::F)
+                }
+            });
+            let mut focus_graph_search_field = false;
+            let mut focus_location_field_for_search = false;
+            if graph_search_available && search_shortcut_pressed {
+                // Omnibox-first graph search: Ctrl+F focuses the location bar
+                // with an `@` query prefix instead of opening a separate dialog.
+                *graph_search_open = false;
+                if !location.starts_with('@') {
+                    *location = "@".to_string();
+                }
+                *location_dirty = true;
+                focus_location_field_for_search = true;
+            }
+
+            let mut suppress_toggle_view = false;
+            if *graph_search_open {
+                refresh_graph_search_matches(
+                    graph_app,
+                    graph_search_query,
+                    graph_search_matches,
+                    graph_search_active_match_index,
+                );
+
+                if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
+                    step_graph_search_active_match(
+                        graph_search_matches,
+                        graph_search_active_match_index,
+                        1,
+                    );
+                }
+                if ctx.input(|i| i.key_pressed(Key::ArrowUp)) {
+                    step_graph_search_active_match(
+                        graph_search_matches,
+                        graph_search_active_match_index,
+                        -1,
+                    );
+                }
+                if ctx.input(|i| i.key_pressed(Key::Enter))
+                    && let Some(node_key) = active_graph_search_match(
+                        graph_search_matches,
+                        *graph_search_active_match_index,
+                    )
+                {
+                    graph_app.apply_intents([GraphIntent::SelectNode {
+                        key: node_key,
+                        multi_select: false,
+                    }]);
+                }
+                if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                    suppress_toggle_view = true;
+                    if graph_search_query.trim().is_empty() {
+                        *graph_search_open = false;
+                        *graph_search_filter_mode = false;
+                    } else {
+                        graph_search_query.clear();
+                    }
+                    refresh_graph_search_matches(
+                        graph_app,
+                        graph_search_query,
+                        graph_search_matches,
+                        graph_search_active_match_index,
+                    );
+                    graph_app.egui_state_dirty = true;
+                }
+            }
+
             // Handle keyboard shortcuts regardless of view (e.g., toggle view)
             let mut keyboard_actions = input::collect_actions(ctx);
+            if suppress_toggle_view {
+                keyboard_actions.toggle_view = false;
+            }
             if keyboard_actions.toggle_view {
                 Self::toggle_tile_view(
                     tiles_tree,
@@ -608,10 +633,10 @@ impl Gui {
                 .retain(|node_key, _| graph_app.graph.get_node(*node_key).is_some());
 
             // Check which view mode we're in (used throughout rendering)
-            let has_webview_tiles = Self::has_any_webview_tiles_in(tiles_tree);
-            let is_graph_view = !has_webview_tiles;
-            let should_sync_webviews = has_webview_tiles;
             let active_webview_node = Self::active_webview_tile_node(tiles_tree);
+            let has_webview_tiles = Self::has_any_webview_tiles_in(tiles_tree);
+            let is_graph_view = active_webview_node.is_none();
+            let should_sync_webviews = has_webview_tiles;
 
             // Webview lifecycle management (create/destroy based on view)
             webview_controller::manage_lifecycle(
@@ -663,7 +688,7 @@ impl Gui {
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             let back_button =
-                                ui.add_enabled(self.can_go_back, Gui::toolbar_button("⏴"));
+                                ui.add_enabled(self.can_go_back, Gui::toolbar_button("<"));
                             back_button.widget_info(|| {
                                 let mut info = WidgetInfo::new(WidgetType::Button);
                                 info.label = Some("Back".into());
@@ -675,7 +700,7 @@ impl Gui {
                             }
 
                             let forward_button =
-                                ui.add_enabled(self.can_go_forward, Gui::toolbar_button("⏵"));
+                                ui.add_enabled(self.can_go_forward, Gui::toolbar_button(">"));
                             forward_button.widget_info(|| {
                                 let mut info = WidgetInfo::new(WidgetType::Button);
                                 info.label = Some("Forward".into());
@@ -699,7 +724,7 @@ impl Gui {
                                     }
                                 },
                                 LoadStatus::Complete => {
-                                    let reload_button = ui.add(Gui::toolbar_button("↻"));
+                                    let reload_button = ui.add(Gui::toolbar_button("R"));
                                     reload_button.widget_info(|| {
                                         let mut info = WidgetInfo::new(WidgetType::Button);
                                         info.label = Some("Reload".into());
@@ -722,7 +747,7 @@ impl Gui {
                                     let mut experimental_preferences_enabled =
                                         state.experimental_preferences_enabled();
                                     let prefs_toggle = ui
-                                        .toggle_value(&mut experimental_preferences_enabled, "☢")
+                                        .toggle_value(&mut experimental_preferences_enabled, "Exp")
                                         .on_hover_text("Enable experimental prefs");
                                     prefs_toggle.widget_info(|| {
                                         let mut info = WidgetInfo::new(WidgetType::Button);
@@ -744,9 +769,9 @@ impl Gui {
                                     let has_webview_tiles =
                                         Self::has_any_webview_tiles_in(tiles_tree);
                                     let (view_icon, view_tooltip) = if has_webview_tiles {
-                                        ("🗺", "Switch to Graph View")
+                                        ("Graph", "Switch to Graph View")
                                     } else {
-                                        ("🌐", "Switch to Detail View")
+                                        ("Detail", "Switch to Detail View")
                                     };
                                     let view_toggle_button = ui
                                         .add(Gui::toolbar_button(view_icon))
@@ -803,6 +828,29 @@ impl Gui {
                                     if clear_data_button.clicked() {
                                         *show_clear_data_confirm = true;
                                     }
+                                    let physics_button = ui
+                                        .add(Gui::toolbar_button("Phys"))
+                                        .on_hover_text("Show/hide physics settings panel");
+                                    if physics_button.clicked() {
+                                        graph_app
+                                            .apply_intents([GraphIntent::TogglePhysicsPanel]);
+                                    }
+
+                                    let new_node_button = ui
+                                        .add(Gui::toolbar_button("Node+"))
+                                        .on_hover_text("Create a new graph node");
+                                    if new_node_button.clicked() {
+                                        graph_app.apply_intents([GraphIntent::CreateNodeNearCenter]);
+                                    }
+                                    let new_tab_button = ui
+                                        .add(Gui::toolbar_button("Tab+"))
+                                        .on_hover_text(
+                                            "Create a new node and open it as a tab in this graph window",
+                                        );
+                                    if new_tab_button.clicked() {
+                                        let node_key = graph_app.create_new_node_near_center();
+                                        Self::open_or_focus_webview_tile(tiles_tree, node_key);
+                                    }
 
                                     let location_id = egui::Id::new("location_input");
                                     let location_field = ui.add_sized(
@@ -816,7 +864,7 @@ impl Gui {
                                         *location_dirty = true;
                                     }
                                     // Handle adddress bar shortcut.
-                                    if ui.input(|i| {
+                                    if focus_location_field_for_search || ui.input(|i| {
                                         if cfg!(target_os = "macos") {
                                             i.clone().consume_key(Modifiers::COMMAND, Key::L)
                                         } else {
@@ -840,25 +888,33 @@ impl Gui {
                                             state.store(ui.ctx(), location_id);
                                         }
                                     }
-                                    // Detect Enter while the address bar has focus.
-                                    // We use a flag so that submission still works even if
-                                    // lost_focus() and key_pressed(Enter) don't coincide
-                                    // in the same frame.
-                                    if location_field.has_focus()
-                                        && ui.input(|i| i.key_pressed(Key::Enter))
-                                    {
+                                    // Submit immediately on Enter while focused.
+                                    // Keep a deferred lost-focus fallback for any backend/event
+                                    // ordering where Enter is observed in a different frame.
+                                    let enter_while_focused = location_field.has_focus()
+                                        && ui.input(|i| i.key_pressed(Key::Enter));
+                                    if enter_while_focused {
                                         *location_submitted = true;
                                     }
-                                    if *location_submitted && location_field.lost_focus() {
+                                    let should_submit_now = enter_while_focused
+                                        || (*location_submitted && location_field.lost_focus());
+                                    if should_submit_now {
                                         *location_submitted = false;
-                                        if webview_controller::handle_address_bar_submit(
+                                        let submit_outcome =
+                                            webview_controller::handle_address_bar_submit(
                                             graph_app,
                                             location,
                                             is_graph_view,
+                                            Self::active_webview_tile_node(tiles_tree)
+                                                .and_then(|key| {
+                                                    graph_app.get_webview_for_node(key)
+                                                }),
                                             window,
-                                        ) {
+                                        );
+                                        if submit_outcome.mark_clean {
                                             *location_dirty = false;
                                             if is_graph_view
+                                                && submit_outcome.open_selected_tile
                                                 && let Some(node_key) =
                                                     graph_app.get_single_selected_node()
                                             {
@@ -874,49 +930,59 @@ impl Gui {
                     );
                 });
 
-                // Only show tab bar in detail view, not in graph view
-                if !has_webview_tiles {
-                    // A simple Tab header strip
-                    TopBottomPanel::top("tabs").show(ctx, |ui| {
-                        ui.allocate_ui_with_layout(
-                            ui.available_size(),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                for (id, webview) in window.webviews().into_iter() {
-                                    let favicon = favicon_textures
-                                        .get(&id)
-                                        .map(|(_, favicon)| favicon)
-                                        .copied();
-                                    Self::browser_tab(ui, window, webview, favicon);
+                if *graph_search_open && is_graph_view {
+                    egui::Window::new("Graph Search")
+                        .id(egui::Id::new("graph_search_window"))
+                        .collapsible(false)
+                        .resizable(false)
+                        .anchor(egui::Align2::RIGHT_TOP, [-16.0, 52.0])
+                        .show(ctx, |ui| {
+                            ui.horizontal(|ui| {
+                                let search_id = egui::Id::new("graph_search_input");
+                                let search_field = ui.add(
+                                    egui::TextEdit::singleline(graph_search_query)
+                                        .id(search_id)
+                                        .desired_width(280.0)
+                                        .hint_text("Find node title or URL"),
+                                );
+                                if focus_graph_search_field {
+                                    search_field.request_focus();
+                                    focus_graph_search_field = false;
                                 }
-
-                                let new_tab_button = ui.add(Gui::toolbar_button("+"));
-                                new_tab_button.widget_info(|| {
-                                    let mut info = WidgetInfo::new(WidgetType::Button);
-                                    info.label = Some("New tab".into());
-                                    info
-                                });
-                                if new_tab_button.clicked() {
-                                    window.queue_user_interface_command(
-                                        UserInterfaceCommand::NewWebView,
+                                if search_field.changed() {
+                                    refresh_graph_search_matches(
+                                        graph_app,
+                                        graph_search_query,
+                                        graph_search_matches,
+                                        graph_search_active_match_index,
                                     );
+                                    graph_app.egui_state_dirty = true;
                                 }
-
-                                let new_window_button = ui.add(Gui::toolbar_button("⊞"));
-                                new_window_button.widget_info(|| {
-                                    let mut info = WidgetInfo::new(WidgetType::Button);
-                                    info.label = Some("New window".into());
-                                    info
-                                });
-                                if new_window_button.clicked() {
-                                    window.queue_user_interface_command(
-                                        UserInterfaceCommand::NewWindow,
+                                if ui.checkbox(graph_search_filter_mode, "Filter").changed() {
+                                    graph_app.egui_state_dirty = true;
+                                }
+                                if ui.button("Clear").clicked() {
+                                    graph_search_query.clear();
+                                    refresh_graph_search_matches(
+                                        graph_app,
+                                        graph_search_query,
+                                        graph_search_matches,
+                                        graph_search_active_match_index,
                                     );
+                                    graph_app.egui_state_dirty = true;
                                 }
-                            },
-                        );
-                    });
+                            });
+                            let active_display = graph_search_active_match_index
+                                .map(|idx| idx + 1)
+                                .unwrap_or(0);
+                            ui.label(format!(
+                                "{} matches | active {}",
+                                graph_search_matches.len(),
+                                active_display
+                            ));
+                        });
                 }
+
             };
 
             if *show_clear_data_confirm {
@@ -971,13 +1037,12 @@ impl Gui {
                                 *data_dir_status = None;
                             }
                             if ui.button("Switch").clicked() {
-                                let raw = data_dir_input.trim();
-                                if raw.is_empty() {
+                                let Some(target_dir) = Self::parse_data_dir_input(data_dir_input)
+                                else {
                                     *data_dir_status =
                                         Some("Enter a non-empty directory path.".to_string());
                                     return;
-                                }
-                                let target_dir = PathBuf::from(raw);
+                                };
                                 match Self::switch_persistence_store(
                                     graph_app,
                                     window,
@@ -1066,16 +1131,29 @@ impl Gui {
             // Check periodic persistence snapshot
             graph_app.check_periodic_snapshot();
 
-            // EXCLUSIVE VIEW RENDERING: Only one of these executes per frame
-            if is_graph_view {
-                // === GRAPH VIEW: Only render the spatial graph ===
+            // Tile-driven rendering path (graph-only and mixed graph/webview panes).
+            if is_graph_view || has_webview_tiles {
+                // === TILE VIEW: render graph pane and any open webview panes ===
                 let mut pending_open_nodes = Vec::new();
                 let mut pending_closed_nodes = Vec::new();
+                let search_query_active = !graph_search_query.trim().is_empty();
+                let search_matches: HashSet<NodeKey> =
+                    graph_search_matches.iter().copied().collect();
+                let active_search_match = active_graph_search_match(
+                    graph_search_matches,
+                    *graph_search_active_match_index,
+                );
                 egui::CentralPanel::default()
                     .frame(egui::Frame::new().fill(egui::Color32::from_rgb(20, 20, 25)))
                     .show(ctx, |ui| {
-                        let mut behavior =
-                            GraphshellTileBehavior::new(graph_app, tile_favicon_textures);
+                        let mut behavior = GraphshellTileBehavior::new(
+                            graph_app,
+                            tile_favicon_textures,
+                            &search_matches,
+                            active_search_match,
+                            *graph_search_filter_mode,
+                            search_query_active,
+                        );
                         tiles_tree.ui(&mut behavior, ui);
                         pending_open_nodes.extend(behavior.take_pending_open_nodes());
                         pending_closed_nodes.extend(behavior.take_pending_closed_nodes());
@@ -1179,7 +1257,7 @@ impl Gui {
                     }
                 }
             } else {
-                // === DETAIL VIEW: Only render the webview ===
+                // Legacy fullscreen-detail fallback (expected to be unused with tile runtime).
                 let scale =
                     Scale::<_, DeviceIndependentPixel, DevicePixel>::new(ctx.pixels_per_point());
 
@@ -1237,10 +1315,6 @@ impl Gui {
             let graph_tile_id = self.tiles_tree.tiles.insert_pane(TileKind::Graph);
             self.tiles_tree.root = Some(graph_tile_id);
         }
-    }
-
-    fn has_any_webview_tiles(&self) -> bool {
-        Self::has_any_webview_tiles_in(&self.tiles_tree)
     }
 
     fn has_any_webview_tiles_in(tiles_tree: &Tree<TileKind>) -> bool {
@@ -1490,8 +1564,8 @@ impl Gui {
             return false;
         }
 
-        // In graph view, show the selected node's URL instead of a webview URL
-        if self.is_graph_view() {
+        // In graph context, show the selected node URL.
+        if !self.has_active_webview_tile() {
             if let Some(key) = self.graph_app.get_single_selected_node() {
                 if let Some(node) = self.graph_app.graph.get_node(key) {
                     if node.url != self.location {
@@ -1503,8 +1577,9 @@ impl Gui {
             return false;
         }
 
-        let current_url_string = window
-            .active_webview()
+        let current_url_string = self
+            .focused_webview_id()
+            .and_then(|id| window.webview_by_id(id))
             .and_then(|webview| Some(webview.url()?.to_string()));
         match current_url_string {
             Some(location) if location != self.location => {
@@ -1516,8 +1591,9 @@ impl Gui {
     }
 
     fn update_load_status(&mut self, window: &ServoShellWindow) -> bool {
-        let state_status = window
-            .active_webview()
+        let state_status = self
+            .focused_webview_id()
+            .and_then(|id| window.webview_by_id(id))
             .map(|webview| webview.load_status())
             .unwrap_or(LoadStatus::Complete);
         let old_status = std::mem::replace(&mut self.load_status, state_status);
@@ -1533,16 +1609,18 @@ impl Gui {
     }
 
     fn update_status_text(&mut self, window: &ServoShellWindow) -> bool {
-        let state_status = window
-            .active_webview()
+        let state_status = self
+            .focused_webview_id()
+            .and_then(|id| window.webview_by_id(id))
             .and_then(|webview| webview.status_text());
         let old_status = std::mem::replace(&mut self.status_text, state_status);
         old_status != self.status_text
     }
 
     fn update_can_go_back_and_forward(&mut self, window: &ServoShellWindow) -> bool {
-        let (can_go_back, can_go_forward) = window
-            .active_webview()
+        let (can_go_back, can_go_forward) = self
+            .focused_webview_id()
+            .and_then(|id| window.webview_by_id(id))
             .map(|webview| (webview.can_go_back(), webview.can_go_forward()))
             .unwrap_or((false, false));
         let old_can_go_back = std::mem::replace(&mut self.can_go_back, can_go_back);
@@ -1741,6 +1819,64 @@ mod tests {
                 .iter()
                 .any(|v| v.contains("missing rendering context"))
         );
+    }
+
+    #[test]
+    fn test_refresh_graph_search_matches_updates_active_index() {
+        let mut app = GraphBrowserApp::new_for_testing();
+        let github = app.add_node_and_sync("https://github.com".into(), Point2D::new(0.0, 0.0));
+        let _example = app.add_node_and_sync("https://example.com".into(), Point2D::new(10.0, 0.0));
+
+        let mut matches = Vec::new();
+        let mut active = None;
+        refresh_graph_search_matches(&app, "gthub", &mut matches, &mut active);
+
+        assert_eq!(matches.first().copied(), Some(github));
+        assert_eq!(active, Some(0));
+
+        refresh_graph_search_matches(&app, "", &mut matches, &mut active);
+        assert!(matches.is_empty());
+        assert_eq!(active, None);
+    }
+
+    #[test]
+    fn test_step_graph_search_active_match_wraps() {
+        let matches = vec![NodeKey::new(1), NodeKey::new(2), NodeKey::new(3)];
+        let mut active = Some(2);
+        step_graph_search_active_match(&matches, &mut active, 1);
+        assert_eq!(active, Some(0));
+
+        step_graph_search_active_match(&matches, &mut active, -1);
+        assert_eq!(active, Some(2));
+    }
+
+    #[test]
+    fn test_active_graph_search_match_returns_current_key() {
+        let matches = vec![NodeKey::new(10), NodeKey::new(11)];
+        assert_eq!(
+            active_graph_search_match(&matches, Some(1)),
+            Some(NodeKey::new(11))
+        );
+        assert_eq!(active_graph_search_match(&matches, Some(2)), None);
+        assert_eq!(active_graph_search_match(&matches, None), None);
+    }
+
+    #[test]
+    fn test_parse_data_dir_input_trims_quotes_and_whitespace() {
+        let parsed = Gui::parse_data_dir_input("  \"C:\\\\tmp\\\\graph data\"  ")
+            .expect("should parse quoted path");
+        assert_eq!(parsed, PathBuf::from("C:\\tmp\\graph data"));
+
+        let parsed_single = Gui::parse_data_dir_input(" 'C:\\\\tmp\\\\graph' ")
+            .expect("should parse single-quoted path");
+        assert_eq!(parsed_single, PathBuf::from("C:\\tmp\\graph"));
+    }
+
+    #[test]
+    fn test_parse_data_dir_input_empty_is_none() {
+        assert!(Gui::parse_data_dir_input("").is_none());
+        assert!(Gui::parse_data_dir_input("   ").is_none());
+        assert!(Gui::parse_data_dir_input("\"\"").is_none());
     }
 
     #[test]
@@ -1960,9 +2096,69 @@ fn graph_intents_from_semantic_events(events: Vec<GraphSemanticEvent>) -> Vec<Gr
     intents
 }
 
-fn apply_pending_graph_semantic_events(graph_app: &mut GraphBrowserApp, window: &ServoShellWindow) {
-    let intents = graph_intents_from_semantic_events(window.take_pending_graph_events());
+fn apply_pending_graph_semantic_events(
+    graph_app: &mut GraphBrowserApp,
+    window: &ServoShellWindow,
+    tiles_tree: &mut Tree<TileKind>,
+) {
+    let events = window.take_pending_graph_events();
+    let created_child_webviews: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GraphSemanticEvent::CreateNewWebView {
+                child_webview_id, ..
+            } => Some(*child_webview_id),
+            _ => None,
+        })
+        .collect();
+    let intents = graph_intents_from_semantic_events(events);
     graph_app.apply_intents(intents);
+    for child_webview_id in created_child_webviews {
+        if let Some(node_key) = graph_app.get_node_for_webview(child_webview_id) {
+            Gui::open_or_focus_webview_tile(tiles_tree, node_key);
+        }
+    }
+}
+
+fn refresh_graph_search_matches(
+    graph_app: &GraphBrowserApp,
+    query: &str,
+    matches: &mut Vec<NodeKey>,
+    active_index: &mut Option<usize>,
+) {
+    if query.trim().is_empty() {
+        matches.clear();
+        *active_index = None;
+        return;
+    }
+
+    *matches = fuzzy_match_node_keys(&graph_app.graph, query);
+    if matches.is_empty() {
+        *active_index = None;
+    } else if active_index.is_none_or(|idx| idx >= matches.len()) {
+        *active_index = Some(0);
+    }
+}
+
+fn step_graph_search_active_match(
+    matches: &[NodeKey],
+    active_index: &mut Option<usize>,
+    step: isize,
+) {
+    if matches.is_empty() {
+        *active_index = None;
+        return;
+    }
+
+    let current = active_index.unwrap_or(0) as isize;
+    let len = matches.len() as isize;
+    let next = (current + step).rem_euclid(len) as usize;
+    *active_index = Some(next);
+}
+
+fn active_graph_search_match(matches: &[NodeKey], active_index: Option<usize>) -> Option<NodeKey> {
+    let idx = active_index?;
+    matches.get(idx).copied()
 }
 
 const NODE_THUMBNAIL_WIDTH: u32 = 256;

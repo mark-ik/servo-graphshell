@@ -4,7 +4,7 @@
 
 //! Initial egui_tiles behavior wiring.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use egui::{Id, Response, Sense, Stroke, TextStyle, Ui, Vec2, WidgetText, vec2};
@@ -21,6 +21,10 @@ use super::tile_kind::TileKind;
 pub(crate) struct GraphshellTileBehavior<'a> {
     pub graph_app: &'a mut GraphBrowserApp,
     tile_favicon_textures: &'a mut HashMap<NodeKey, (u64, egui::TextureHandle)>,
+    search_matches: &'a HashSet<NodeKey>,
+    active_search_match: Option<NodeKey>,
+    search_filter_mode: bool,
+    search_query_active: bool,
     pending_open_nodes: Vec<NodeKey>,
     pending_closed_nodes: Vec<NodeKey>,
 }
@@ -29,10 +33,18 @@ impl<'a> GraphshellTileBehavior<'a> {
     pub fn new(
         graph_app: &'a mut GraphBrowserApp,
         tile_favicon_textures: &'a mut HashMap<NodeKey, (u64, egui::TextureHandle)>,
+        search_matches: &'a HashSet<NodeKey>,
+        active_search_match: Option<NodeKey>,
+        search_filter_mode: bool,
+        search_query_active: bool,
     ) -> Self {
         Self {
             graph_app,
             tile_favicon_textures,
+            search_matches,
+            active_search_match,
+            search_filter_mode,
+            search_query_active,
             pending_open_nodes: Vec::new(),
             pending_closed_nodes: Vec::new(),
         }
@@ -117,7 +129,14 @@ impl<'a> Behavior<TileKind> for GraphshellTileBehavior<'a> {
     fn pane_ui(&mut self, ui: &mut egui::Ui, _tile_id: TileId, pane: &mut TileKind) -> UiResponse {
         match pane {
             TileKind::Graph => {
-                let actions = render::render_graph_in_ui_collect_actions(ui, self.graph_app);
+                let actions = render::render_graph_in_ui_collect_actions(
+                    ui,
+                    self.graph_app,
+                    self.search_matches,
+                    self.active_search_match,
+                    self.search_filter_mode,
+                    self.search_query_active,
+                );
                 let mut passthrough_actions = Vec::new();
 
                 for action in actions {

@@ -224,6 +224,18 @@ pub struct GraphBrowserApp {
 }
 
 impl GraphBrowserApp {
+    pub fn default_physics_state() -> FruchtermanReingoldState {
+        let mut state = FruchtermanReingoldState::default();
+        // Tighter defaults: avoid explosive node drift on resume while
+        // preserving enough movement for layout convergence.
+        state.c_repulse = 0.75;
+        state.c_attract = 0.08;
+        state.k_scale = 0.65;
+        state.max_step = 10.0;
+        state.damping = 0.92;
+        state
+    }
+
     /// Create a new graph browser application
     pub fn new() -> Self {
         Self::new_from_dir(GraphStore::default_data_dir())
@@ -248,7 +260,7 @@ impl GraphBrowserApp {
 
         Self {
             graph,
-            physics: FruchtermanReingoldState::default(),
+            physics: Self::default_physics_state(),
             physics_running_before_interaction: None,
             selected_nodes: SelectionState::new(),
             webview_to_node: HashMap::new(),
@@ -271,7 +283,7 @@ impl GraphBrowserApp {
     pub fn new_for_testing() -> Self {
         Self {
             graph: Graph::new(),
-            physics: FruchtermanReingoldState::default(),
+            physics: Self::default_physics_state(),
             physics_running_before_interaction: None,
             selected_nodes: SelectionState::new(),
             webview_to_node: HashMap::new(),

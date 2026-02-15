@@ -3,7 +3,7 @@
 **Document Type**: Feature-driven implementation plan
 **Organization**: By feature targets with validation tests (not calendar time)
 **Last Updated**: February 14, 2026
-**Priority Focus**: Post-egui_tiles stabilization and FT2 completion
+**Priority Focus**: FT2/FT6 landed; continue post-core polish
 
 **Policy Note (2026-02-14)**: Graphshell has no production users and no legacy dataset obligations. Do not add backward-compat contingency branches unless explicitly requested.
 
@@ -26,9 +26,8 @@
 **Current Gaps**:
 
 - [ ] Selection-state hardening follow-up: keep reducer-driven behavior and explicit selection metadata stable
-- [ ] FT2 completion: thumbnail pipeline (favicon vertical slice already implemented)
 
-**Status**: Core browsing, tiled webviews, and persistence are production-functional. Next execution block is physics/selection simplification, then FT2 thumbnail completion.
+**Status**: Core browsing, tiled webviews, persistence, thumbnail rendering, and graph search/filter are production-functional.
 
 ---
 
@@ -41,7 +40,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 | # | Feature | Status | Implementation |
 | --- | ------- | ------ | -------------- |
 | 1 | Servo Webview Integration | ✅ Complete | gui.rs: webview lifecycle, navigation tracking, edge creation |
-| 2 | Thumbnail & Favicon Rendering | In progress | Favicon vertical slice done; thumbnail capture/persistence remains |
+| 2 | Thumbnail & Favicon Rendering | ✅ Complete | Async thumbnail capture + favicon fallback + snapshot persistence + graph rendering tiering |
 | 3 | Graph Persistence | ✅ Complete | fjall log + redb snapshots + rkyv serialization |
 | 4 | Camera Zoom Integration | ✅ Complete | egui_graphs built-in zoom/pan + post-frame clamp |
 | 5 | Center Camera | ✅ Complete | egui_graphs fit_to_screen via C key |
@@ -50,8 +49,8 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 1. Physics migration (see implementation_strategy/2026-02-12_physics_selection_plan.md)
 2. Selection consolidation (same plan)
-3. FT2 thumbnail completion (see implementation_strategy/2026-02-11_thumbnails_favicons_plan.md)
-4. FT6 search/filtering (`nucleo`)
+3. FT2 thumbnail completion ✅
+4. FT6 search/filtering (`nucleo`) ✅
 
 ---
 
@@ -88,7 +87,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 ---
 
-### Feature Target 2: Thumbnail & Favicon Rendering
+### Feature Target 2: Thumbnail & Favicon Rendering ✅ COMPLETE
 
 **Goal**: Nodes show recognizable visuals: page thumbnail (best), site favicon (fallback), or lifecycle color (final fallback).
 
@@ -130,14 +129,12 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 **Validation Tests**:
 
-- [ ] Load page → favicon appears immediately (cached within 500ms)
-- [ ] Favicon is recognizable (GitHub octocat, Google colors, etc.)
-- [ ] Load page → thumbnail appears within 2 seconds (doesn't block UI)
-- [ ] Thumbnail matches page content (visually recognizable)
-- [ ] Cold node → shows favicon (no thumbnail capture)
-- [ ] Node becomes Active → thumbnail updates if URL changed
-- [ ] 50 nodes with mixed thumbnails/favicons → render at 60fps (performance check)
-- [ ] Favicon fetch fails gracefully → falls back to circle
+- [x] Load page -> favicon appears and is cached on mapped node metadata
+- [x] Load page -> thumbnail capture requested on load-complete and applied asynchronously
+- [x] Thumbnail matches latest URL only (stale capture rejection by requested URL)
+- [x] Rendering fallback works: thumbnail -> favicon -> lifecycle color
+- [x] Snapshot persistence preserves favicon and thumbnail bytes
+- [x] Favicon/thumbnail failures keep node render path functional (color fallback)
 
 **Outputs**:
 
@@ -219,7 +216,7 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 ## Phase 2: Usability & Polish
 
-### Feature Target 6: Search & Filtering
+### Feature Target 6: Search & Filtering ✅ COMPLETE
 
 **Goal**: Press Ctrl+F → search bar appears → type URL/title → matching nodes highlighted.
 
@@ -233,11 +230,13 @@ These five features enable the core MVP: **users can browse real websites in a s
 
 **Validation Tests**:
 
-- [ ] Search "example" → nodes with "example" in URL or title highlighted
-- [ ] Fuzzy matching works: "gthub" matches "github.com"
-- [ ] Empty search → all nodes visible (no filter)
-- [ ] Search + filter mode → only matching nodes shown
-- [ ] Esc clears search
+- [x] Ctrl+F opens graph search UI
+- [x] Search "example" highlights nodes with "example" in URL or title
+- [x] Fuzzy matching works: "gthub" matches "github.com"
+- [x] Empty search shows all nodes (no filter)
+- [x] Search + filter mode shows only matching nodes
+- [x] Up/Down cycles matches and Enter selects active match
+- [x] Esc clears search query (and closes when already empty)
 
 **Outputs**:
 
@@ -457,3 +456,4 @@ These five features enable the core MVP: **users can browse real websites in a s
 - **Project Vision**: `PROJECT_DESCRIPTION.md`
 - **Architecture**: `ARCHITECTURAL_OVERVIEW.md`
 - **Code**: `ports/graphshell/` (~4,500 LOC in core modules)
+

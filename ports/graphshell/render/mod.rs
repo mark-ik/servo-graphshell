@@ -8,8 +8,8 @@
 //! which provides built-in navigation (zoom/pan), node dragging, and selection.
 
 use crate::app::{GraphBrowserApp, GraphIntent};
-use crate::graph::NodeKey;
 use crate::graph::egui_adapter::{EguiGraphState, GraphNodeShape};
+use crate::graph::{NodeKey, NodeLifecycle};
 use egui::{Color32, Ui, Vec2, Window};
 use egui_graphs::events::Event;
 use egui_graphs::{
@@ -20,6 +20,7 @@ use egui_graphs::{
 use euclid::default::Point2D;
 use petgraph::stable_graph::NodeIndex;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 /// Graph interaction action (resolved from egui_graphs events).
@@ -48,12 +49,33 @@ pub fn render_graph_info_in_ui(ui: &mut Ui, app: &GraphBrowserApp) {
 pub fn render_graph_in_ui_collect_actions(
     ui: &mut Ui,
     app: &mut GraphBrowserApp,
+    search_matches: &HashSet<NodeKey>,
+    active_search_match: Option<NodeKey>,
+    search_filter_mode: bool,
+    search_query_active: bool,
 ) -> Vec<GraphAction> {
-    // Build or reuse egui_graphs state (only rebuild when graph structure changes)
-    if app.egui_state.is_none() || app.egui_state_dirty {
-        app.egui_state = Some(EguiGraphState::from_graph(&app.graph, &app.selected_nodes));
+    let filtered_graph = if search_filter_mode && search_query_active {
+        Some(filtered_graph_for_search(app, search_matches))
+    } else {
+        None
+    };
+    let graph_for_render = filtered_graph.as_ref().unwrap_or(&app.graph);
+
+    // Build or reuse egui_graphs state (rebuild always when filtering is active).
+    if app.egui_state.is_none() || app.egui_state_dirty || filtered_graph.is_some() {
+        app.egui_state = Some(EguiGraphState::from_graph(
+            graph_for_render,
+            &app.selected_nodes,
+        ));
         app.egui_state_dirty = false;
     }
+
+    apply_search_node_visuals(
+        app,
+        search_matches,
+        active_search_match,
+        search_query_active,
+    );
 
     // Event collection buffer
     let events: Rc<RefCell<Vec<Event>>> = Rc::new(RefCell::new(Vec::new()));
@@ -111,6 +133,64 @@ pub fn render_graph_in_ui_collect_actions(
     clamp_zoom(ui.ctx(), app);
 
     collect_graph_actions(app, &events)
+}
+
+fn filtered_graph_for_search(
+    app: &GraphBrowserApp,
+    search_matches: &HashSet<NodeKey>,
+) -> crate::graph::Graph {
+    let mut filtered = app.graph.clone();
+    let to_remove: Vec<NodeKey> = filtered
+        .nodes()
+        .map(|(key, _)| key)
+        .filter(|key| !search_matches.contains(key))
+        .collect();
+    for key in to_remove {
+        filtered.remove_node(key);
+    }
+    filtered
+}
+
+fn lifecycle_color(lifecycle: NodeLifecycle) -> Color32 {
+    match lifecycle {
+        NodeLifecycle::Active => Color32::from_rgb(100, 200, 255),
+        NodeLifecycle::Cold => Color32::from_rgb(140, 140, 165),
+    }
+}
+
+fn apply_search_node_visuals(
+    app: &mut GraphBrowserApp,
+    search_matches: &HashSet<NodeKey>,
+    active_search_match: Option<NodeKey>,
+    search_query_active: bool,
+) {
+    let colors: Vec<(NodeKey, Color32)> = app
+        .graph
+        .nodes()
+        .map(|(key, node)| {
+            let mut color = lifecycle_color(node.lifecycle);
+            if app.selected_nodes.contains(&key) {
+                color = Color32::from_rgb(255, 200, 100);
+            }
+            if search_query_active && search_matches.contains(&key) {
+                color = if active_search_match == Some(key) {
+                    Color32::from_rgb(140, 255, 140)
+                } else {
+                    Color32::from_rgb(95, 220, 130)
+                };
+            }
+            (key, color)
+        })
+        .collect();
+
+    let Some(state) = app.egui_state.as_mut() else {
+        return;
+    };
+    for (key, color) in colors {
+        if let Some(node) = state.graph.node_mut(key) {
+            node.set_color(color);
+        }
+    }
 }
 
 /// Clamp the egui_graphs zoom to the camera's min/max bounds.
@@ -293,7 +373,7 @@ fn draw_graph_info(ui: &mut egui::Ui, app: &GraphBrowserApp) {
     );
 
     // Draw controls hint
-    let controls_text = "Double-click: Select/Open | N: New Node | Del: Remove | T: Physics | C: Fit | Home/Esc: Toggle View | F1/?: Help";
+    let controls_text = "Shortcuts: Double-click Select/Open | N New Node | Del Remove | T Physics | C Fit | Ctrl+F Search | Home/Esc Toggle View | F1/? Help";
     ui.painter().text(
         ui.available_rect_before_wrap().left_bottom() + Vec2::new(10.0, -10.0),
         egui::Align2::LEFT_BOTTOM,
@@ -400,7 +480,7 @@ pub fn render_physics_panel(ctx: &egui::Context, app: &mut GraphBrowserApp) {
             ui.horizontal(|ui| {
                 if ui.button("Reset to Defaults").clicked() {
                     let running = config.is_running;
-                    config = FruchtermanReingoldState::default();
+                    config = GraphBrowserApp::default_physics_state();
                     config.is_running = running;
                     config_changed = true;
                 }
@@ -448,6 +528,9 @@ pub fn render_help_panel(ctx: &egui::Context, app: &mut GraphBrowserApp) {
                         ("T", "Toggle physics simulation"),
                         ("C", "Fit graph to screen"),
                         ("P", "Physics settings panel"),
+                        ("Ctrl+F", "Show graph search"),
+                        ("Search Up/Down", "Cycle graph matches"),
+                        ("Search Enter", "Select active search match"),
                         ("F1 / ?", "This help panel"),
                         ("Ctrl+L / Alt+D", "Focus address bar"),
                         ("Double-click node", "Open node in detail view"),
